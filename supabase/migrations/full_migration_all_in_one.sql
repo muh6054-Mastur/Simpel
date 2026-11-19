@@ -177,8 +177,36 @@ CREATE TABLE IF NOT EXISTS public.teaching_assignments (
     academic_year_id UUID NOT NULL REFERENCES public.academic_years(id) ON DELETE CASCADE,
     semester_id UUID NOT NULL REFERENCES public.semesters(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
-    CONSTRAINT uq_teaching_assignment UNIQUE (teacher_id, class_id, subject_id, academic_year_id, semester_id)
+    CONSTRAINT uq_teaching_assignment UNIQUE (class_id, subject_id, academic_year_id, semester_id)
 );
+
+-- Migrasi idempoten jika constraint lama masih menyertakan teacher_id (5 kolom)
+DO $$
+DECLARE
+    col_count INT;
+BEGIN
+    SELECT array_length(c.conkey, 1) INTO col_count
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = 'public'
+      AND t.relname = 'teaching_assignments'
+      AND c.conname = 'uq_teaching_assignment';
+
+    IF col_count IS NOT NULL AND col_count <> 4 THEN
+        DELETE FROM public.teaching_assignments a
+        USING public.teaching_assignments b
+        WHERE a.ctid < b.ctid
+          AND a.class_id = b.class_id
+          AND a.subject_id = b.subject_id
+          AND a.academic_year_id = b.academic_year_id
+          AND a.semester_id = b.semester_id;
+
+        ALTER TABLE public.teaching_assignments DROP CONSTRAINT IF EXISTS uq_teaching_assignment;
+        ALTER TABLE public.teaching_assignments
+            ADD CONSTRAINT uq_teaching_assignment UNIQUE (class_id, subject_id, academic_year_id, semester_id);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS public.homeroom_assignments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -347,8 +375,11 @@ CREATE TABLE IF NOT EXISTS public.assessments (
     assessment_type assessment_type_enum NOT NULL,
     assessment_date DATE NOT NULL DEFAULT CURRENT_DATE,
     kktp NUMERIC(5,2) NOT NULL DEFAULT 75.00,
+    scope_key TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
+
+ALTER TABLE public.assessments ADD COLUMN IF NOT EXISTS scope_key TEXT;
 
 CREATE TABLE IF NOT EXISTS public.assessment_components (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -389,11 +420,16 @@ CREATE TABLE IF NOT EXISTS public.remedial_records (
     remedial_activity TEXT NOT NULL,
     execution_date DATE NOT NULL DEFAULT CURRENT_DATE,
     score_before NUMERIC(5,2) NOT NULL,
-    score_after NUMERIC(5,2) NOT NULL,
+    score_after NUMERIC(5,2),
     follow_up_action TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
-    CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_after >= 0 AND score_before <= 100 AND score_after <= 100)
+    CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_before <= 100 AND (score_after IS NULL OR (score_after >= 0 AND score_after <= 100)))
 );
+
+ALTER TABLE public.remedial_records ALTER COLUMN score_after DROP NOT NULL;
+ALTER TABLE public.remedial_records DROP CONSTRAINT IF EXISTS ck_remedial_scores;
+ALTER TABLE public.remedial_records
+    ADD CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_before <= 100 AND (score_after IS NULL OR (score_after >= 0 AND score_after <= 100)));
 
 CREATE TABLE IF NOT EXISTS public.enrichment_records (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -715,7 +751,11 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     role_val text;
     idx int := 0;
@@ -734,13 +774,13 @@ BEGIN
 
     IF lower(NEW.email) = 'alihsansoborejo@gmail.com' THEN
         INSERT INTO public.user_roles (user_id, role, is_primary)
-        VALUES (NEW.id, 'admin', TRUE)
+        VALUES (NEW.id, 'admin'::public.user_role_type, TRUE)
         ON CONFLICT (user_id, role) DO NOTHING;
     ELSIF jsonb_typeof(NEW.raw_user_meta_data->'roles') = 'array' THEN
         FOR role_val IN SELECT jsonb_array_elements_text(NEW.raw_user_meta_data->'roles') LOOP
             IF role_val IN ('guru', 'wali_kelas', 'kepala_madrasah') THEN
                 INSERT INTO public.user_roles (user_id, role, is_primary)
-                VALUES (NEW.id, role_val::user_role_type, idx = 0)
+                VALUES (NEW.id, role_val::public.user_role_type, idx = 0)
                 ON CONFLICT (user_id, role) DO NOTHING;
                 idx := idx + 1;
             END IF;
@@ -749,13 +789,13 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = NEW.id) THEN
         INSERT INTO public.user_roles (user_id, role, is_primary)
-        VALUES (NEW.id, 'guru', TRUE)
+        VALUES (NEW.id, 'guru'::public.user_role_type, TRUE)
         ON CONFLICT (user_id, role) DO NOTHING;
     END IF;
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
@@ -776,10 +816,71 @@ ON CONFLICT (id) DO UPDATE
 SET email = EXCLUDED.email;
 
 INSERT INTO public.user_roles (user_id, role, is_primary)
-SELECT au.id, 'admin'::user_role_type, TRUE
+SELECT au.id, 'admin'::public.user_role_type, TRUE
 FROM auth.users au
 WHERE lower(au.email) = 'alihsansoborejo@gmail.com'
 ON CONFLICT (user_id, role) DO NOTHING;
+
+INSERT INTO public.user_roles (user_id, role, is_primary)
+SELECT au.id, 'guru'::public.user_role_type, TRUE
+FROM auth.users au
+WHERE au.email IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id = au.id)
+ON CONFLICT (user_id, role) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.ensure_current_user_profile()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_uid UUID := auth.uid();
+    v_email TEXT;
+    v_full_name TEXT;
+    v_avatar TEXT;
+BEGIN
+    IF v_uid IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT
+        au.email,
+        COALESCE(au.raw_user_meta_data->>'full_name', split_part(au.email, '@', 1)),
+        au.raw_user_meta_data->>'avatar_url'
+    INTO v_email, v_full_name, v_avatar
+    FROM auth.users au
+    WHERE au.id = v_uid
+    LIMIT 1;
+
+    IF v_email IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
+    VALUES (v_uid, v_email, v_full_name, v_avatar, TRUE)
+    ON CONFLICT (id) DO UPDATE
+    SET email = EXCLUDED.email,
+        full_name = COALESCE(NULLIF(public.profiles.full_name, ''), EXCLUDED.full_name);
+
+    IF lower(v_email) = 'alihsansoborejo@gmail.com' THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (v_uid, 'admin'::public.user_role_type, TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = v_uid) THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (v_uid, 'guru'::public.user_role_type, TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    END IF;
+
+    RETURN TRUE;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.ensure_current_user_profile() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ensure_current_user_profile() TO authenticated;
 
 -- HELPER FUNCTIONS FOR RLS
 CREATE OR REPLACE FUNCTION public.has_role(target_role user_role_type)
@@ -1520,8 +1621,9 @@ DECLARE
         'system_settings', 'academic_years', 'semesters', 'classes', 'subjects',
         'teachers', 'students', 'class_members', 'teaching_assignments', 'homeroom_assignments',
         'schedules', 'teaching_journals', 'student_attendance', 'assessments', 'grades',
-        'final_grades', 'report_cards', 'document_links', 'supervision_records',
-        'student_guidance_records', 'notifications'
+        'remedial_records', 'enrichment_records', 'final_grades', 'report_cards',
+        'document_links', 'document_reviews', 'supervision_records', 'supervision_results',
+        'supervision_followups', 'student_guidance_records', 'notifications', 'activity_logs'
     ];
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
@@ -1748,3 +1850,20 @@ BEGIN
         END IF;
     END IF;
 END $$;
+
+-- ==========================================
+-- BAGIAN 9: HAK AKSES SCHEMA & TABEL POSTGRESQL (WAJIB UNTUK PROYEK SUPABASE BARU)
+-- ==========================================
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+GRANT SELECT ON public.system_settings, public.app_sync_state TO anon;
+GRANT EXECUTE ON FUNCTION public.ensure_current_user_profile() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.has_role(public.user_role_type) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_principal() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_current_teacher_id() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_homeroom_of_class(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_teacher_of_assignment(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_student_taught_by_me(UUID) TO authenticated;
+

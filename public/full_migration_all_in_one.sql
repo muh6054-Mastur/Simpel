@@ -177,8 +177,36 @@ CREATE TABLE IF NOT EXISTS public.teaching_assignments (
     academic_year_id UUID NOT NULL REFERENCES public.academic_years(id) ON DELETE CASCADE,
     semester_id UUID NOT NULL REFERENCES public.semesters(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
-    CONSTRAINT uq_teaching_assignment UNIQUE (teacher_id, class_id, subject_id, academic_year_id, semester_id)
+    CONSTRAINT uq_teaching_assignment UNIQUE (class_id, subject_id, academic_year_id, semester_id)
 );
+
+-- Migrasi idempoten jika constraint lama masih menyertakan teacher_id (5 kolom)
+DO $$
+DECLARE
+    col_count INT;
+BEGIN
+    SELECT array_length(c.conkey, 1) INTO col_count
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = 'public'
+      AND t.relname = 'teaching_assignments'
+      AND c.conname = 'uq_teaching_assignment';
+
+    IF col_count IS NOT NULL AND col_count <> 4 THEN
+        DELETE FROM public.teaching_assignments a
+        USING public.teaching_assignments b
+        WHERE a.ctid < b.ctid
+          AND a.class_id = b.class_id
+          AND a.subject_id = b.subject_id
+          AND a.academic_year_id = b.academic_year_id
+          AND a.semester_id = b.semester_id;
+
+        ALTER TABLE public.teaching_assignments DROP CONSTRAINT IF EXISTS uq_teaching_assignment;
+        ALTER TABLE public.teaching_assignments
+            ADD CONSTRAINT uq_teaching_assignment UNIQUE (class_id, subject_id, academic_year_id, semester_id);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS public.homeroom_assignments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -347,8 +375,11 @@ CREATE TABLE IF NOT EXISTS public.assessments (
     assessment_type assessment_type_enum NOT NULL,
     assessment_date DATE NOT NULL DEFAULT CURRENT_DATE,
     kktp NUMERIC(5,2) NOT NULL DEFAULT 75.00,
+    scope_key TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
+
+ALTER TABLE public.assessments ADD COLUMN IF NOT EXISTS scope_key TEXT;
 
 CREATE TABLE IF NOT EXISTS public.assessment_components (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -389,11 +420,16 @@ CREATE TABLE IF NOT EXISTS public.remedial_records (
     remedial_activity TEXT NOT NULL,
     execution_date DATE NOT NULL DEFAULT CURRENT_DATE,
     score_before NUMERIC(5,2) NOT NULL,
-    score_after NUMERIC(5,2) NOT NULL,
+    score_after NUMERIC(5,2),
     follow_up_action TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
-    CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_after >= 0 AND score_before <= 100 AND score_after <= 100)
+    CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_before <= 100 AND (score_after IS NULL OR (score_after >= 0 AND score_after <= 100)))
 );
+
+ALTER TABLE public.remedial_records ALTER COLUMN score_after DROP NOT NULL;
+ALTER TABLE public.remedial_records DROP CONSTRAINT IF EXISTS ck_remedial_scores;
+ALTER TABLE public.remedial_records
+    ADD CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_before <= 100 AND (score_after IS NULL OR (score_after >= 0 AND score_after <= 100)));
 
 CREATE TABLE IF NOT EXISTS public.enrichment_records (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -1585,8 +1621,9 @@ DECLARE
         'system_settings', 'academic_years', 'semesters', 'classes', 'subjects',
         'teachers', 'students', 'class_members', 'teaching_assignments', 'homeroom_assignments',
         'schedules', 'teaching_journals', 'student_attendance', 'assessments', 'grades',
-        'final_grades', 'report_cards', 'document_links', 'supervision_records',
-        'student_guidance_records', 'notifications'
+        'remedial_records', 'enrichment_records', 'final_grades', 'report_cards',
+        'document_links', 'document_reviews', 'supervision_records', 'supervision_results',
+        'supervision_followups', 'student_guidance_records', 'notifications', 'activity_logs'
     ];
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN

@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS public.teaching_assignments (
     academic_year_id UUID NOT NULL REFERENCES public.academic_years(id) ON DELETE CASCADE,
     semester_id UUID NOT NULL REFERENCES public.semesters(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
-    CONSTRAINT uq_teaching_assignment UNIQUE (teacher_id, class_id, subject_id, academic_year_id, semester_id)
+    CONSTRAINT uq_teaching_assignment UNIQUE (class_id, subject_id, academic_year_id, semester_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.homeroom_assignments (
@@ -339,6 +339,7 @@ CREATE TABLE IF NOT EXISTS public.assessments (
     assessment_type assessment_type_enum NOT NULL,
     assessment_date DATE NOT NULL DEFAULT CURRENT_DATE,
     kktp NUMERIC(5,2) NOT NULL DEFAULT 75.00,
+    scope_key TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
 
@@ -381,10 +382,10 @@ CREATE TABLE IF NOT EXISTS public.remedial_records (
     remedial_activity TEXT NOT NULL,
     execution_date DATE NOT NULL DEFAULT CURRENT_DATE,
     score_before NUMERIC(5,2) NOT NULL,
-    score_after NUMERIC(5,2) NOT NULL,
+    score_after NUMERIC(5,2),
     follow_up_action TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
-    CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_after >= 0 AND score_before <= 100 AND score_after <= 100)
+    CONSTRAINT ck_remedial_scores CHECK (score_before >= 0 AND score_before <= 100 AND (score_after IS NULL OR (score_after >= 0 AND score_after <= 100)))
 );
 
 CREATE TABLE IF NOT EXISTS public.enrichment_records (
