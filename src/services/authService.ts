@@ -398,15 +398,52 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
 
 export async function fetchFullUserAccount(userId: string, emailFallback?: string): Promise<AuthUser> {
   // 1. Ambil data profil
-  const { data: profileData, error: profileError } = await supabase
+  let { data: profileData, error: profileError } = await supabase
     .from('profiles')
     .select('*')
     .eq('id', userId)
-    .single();
+    .maybeSingle();
+
+  const isPermissionDenied =
+    profileError?.code === '42501' ||
+    Boolean(profileError?.message && /permission denied/i.test(profileError.message));
+
+  if (isPermissionDenied) {
+    throw new Error(
+      'Izin akses tabel PostgreSQL (GRANT) di proyek Supabase baru belum aktif (42501 permission denied). Salin & jalankan ulang Skrip SQL Lengkap terbaru (atau skrip GRANT) di Supabase SQL Editor.'
+    );
+  }
+
+  const isMissingTableError =
+    profileError?.code === '42P01' ||
+    profileError?.code === 'PGRST205' ||
+    Boolean(profileError?.message && /does not exist|schema cache/i.test(profileError.message));
+
+  if (isMissingTableError) {
+    throw new Error(
+      'Tabel public.profiles belum ada di proyek Supabase aktif saat ini. Buka SQL Editor di dashboard proyek Supabase baru Anda, jalankan seluruh skrip SQL migrasi, lalu coba hubungkan kembali.'
+    );
+  }
+
+  // Jika tabel sudah ada tetapi baris profil user belum terbentuk, coba pulihkan otomatis lewat RPC
+  if (!profileData) {
+    try {
+      await supabase.rpc('ensure_current_user_profile');
+      const retryRes = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+      profileData = retryRes.data;
+      profileError = retryRes.error;
+    } catch {
+      // ignore if RPC does not exist yet
+    }
+  }
 
   if (profileError || !profileData) {
     throw new Error(
-      'Profil pengguna belum ada di tabel public.profiles. Pastikan skrip SQL migrasi terbaru sudah dijalankan di Supabase SQL Editor.'
+      'Profil pengguna belum ada di tabel public.profiles. Pastikan skrip SQL migrasi terbaru sudah dijalankan hingga selesai (Success) di Supabase SQL Editor proyek baru Anda.'
     );
   }
 
@@ -417,10 +454,24 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
   }
 
   // 2. Ambil peran pengguna dari user_roles
-  const { data: rolesData, error: rolesError } = await supabase
+  let { data: rolesData, error: rolesError } = await supabase
     .from('user_roles')
     .select('role, is_primary')
     .eq('user_id', userId);
+
+  if (!rolesError && (!rolesData || rolesData.length === 0)) {
+    try {
+      await supabase.rpc('ensure_current_user_profile');
+      const retryRoles = await supabase
+        .from('user_roles')
+        .select('role, is_primary')
+        .eq('user_id', userId);
+      rolesData = retryRoles.data;
+      rolesError = retryRoles.error;
+    } catch {
+      // ignore
+    }
+  }
 
   if (rolesError || !rolesData || rolesData.length === 0) {
     throw new Error(
