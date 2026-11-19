@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { attendanceService } from '../../services/attendanceService';
 import { academicService } from '../../services/academicService';
 import {
@@ -12,7 +12,7 @@ import {
 } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
-import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
 import {
   CheckCircle,
   Save,
@@ -76,11 +76,17 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
     Record<string, { status: AttendanceStatus; notes: string }>
   >({});
 
+  const isAttendanceDirtyRef = useRef<boolean>(false);
+  const selectedDateRef = useRef<string>(selectedDate);
+  selectedDateRef.current = selectedDate;
+  const selectedMonthRef = useRef<string>(selectedMonth);
+  selectedMonthRef.current = selectedMonth;
+
   useEffect(() => {
     setActiveTab(initialMode);
   }, [initialMode]);
 
-  const loadInitialData = async () => {
+  const loadInitialData = async (silent = false) => {
     if (activeRole !== 'wali_kelas') {
       setHomeroomClassId('');
       setSelectedClassId('');
@@ -89,7 +95,9 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       return;
     }
 
-    setIsLoading(true);
+    if (!silent) {
+      setIsLoading(true);
+    }
     try {
       const [clss, stds, cm, sysSettings, years, sems, teacher] = await Promise.all([
         academicService.getClasses(),
@@ -126,9 +134,13 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       setSelectedClassId(userHrClass);
 
       if (userHrClass) {
+        const activeDate = selectedDateRef.current;
+        const activeMonth = selectedMonthRef.current;
         await Promise.all([
-          loadAttendanceForClass(userHrClass, selectedDate, stds, cm),
-          loadMonthlyAttendance(userHrClass, selectedMonth),
+          !silent || !isAttendanceDirtyRef.current
+            ? loadAttendanceForClass(userHrClass, activeDate, stds, cm)
+            : Promise.resolve(),
+          loadMonthlyAttendance(userHrClass, activeMonth),
         ]);
       } else {
         setAttendanceMap({});
@@ -137,7 +149,9 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
     } catch (err) {
       console.error('Gagal memuat data awal presensi:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -201,6 +215,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
 
   useEffect(() => {
     if (selectedClassId && allStudents.length > 0) {
+      isAttendanceDirtyRef.current = false;
       void loadAttendanceForClass(selectedClassId, selectedDate, allStudents, classMembers);
     }
   }, [selectedClassId, selectedDate]);
@@ -225,7 +240,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       'simpel_semesters',
     ],
     () => {
-      void loadInitialData();
+      void loadInitialData(true);
     }
   );
 
@@ -258,6 +273,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
   const isHomeroomLocked = true;
 
   const handleMarkAllPresent = () => {
+    isAttendanceDirtyRef.current = true;
     const updated: Record<string, { status: AttendanceStatus; notes: string }> = {};
     displayedStudents.forEach((s) => {
       updated[s.id] = {
@@ -269,6 +285,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
   };
 
   const handleStatusChange = (studentId: string, status: AttendanceStatus) => {
+    isAttendanceDirtyRef.current = true;
     setAttendanceMap((prev) => ({
       ...prev,
       [studentId]: {
@@ -279,6 +296,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
   };
 
   const handleNotesChange = (studentId: string, notes: string) => {
+    isAttendanceDirtyRef.current = true;
     setAttendanceMap((prev) => ({
       ...prev,
       [studentId]: {
@@ -304,6 +322,8 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({
       }));
 
       await attendanceService.recordAttendance(payload);
+      isAttendanceDirtyRef.current = false;
+      notifyDomFormSaved();
       await loadMonthlyAttendance(selectedClassId, selectedMonth);
       setStatusMessage(`Presensi ${currentClass.name} tanggal ${selectedDate} berhasil disimpan ke database.`);
       setTimeout(() => setStatusMessage(null), 3500);

@@ -31,7 +31,7 @@ import {
   Power,
   HardDrive,
 } from 'lucide-react';
-import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
 import { useAuth } from '../../context/AuthContext';
 import { useSync } from '../../context/SyncContext';
 import { signInSupabaseStrict } from '../../services/authService';
@@ -51,6 +51,7 @@ export const AcademicSettingsPage: React.FC = () => {
   const [restoreLoading, setRestoreLoading] = useState<boolean>(false);
   const [backupFeedback, setBackupFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement | null>(null);
+  const isSettingsDirtyRef = useRef<boolean>(false);
 
   // Form input untuk Tahun Ajaran Baru
   const [showAddYearModal, setShowAddYearModal] = useState<boolean>(false);
@@ -211,31 +212,45 @@ export const AcademicSettingsPage: React.FC = () => {
     }
   };
 
-  const loadData = async () => {
-    setIsLoading(true);
+  const loadData = async (silent = false) => {
+    if (!silent) {
+      setIsLoading(true);
+    }
     try {
       const [sets, years, sems] = await Promise.all([
         academicService.getSettings(),
         academicService.getAcademicYears(),
         academicService.getSemesters(),
       ]);
-      setSettings(sets);
+      if (!silent || !isSettingsDirtyRef.current) {
+        setSettings(sets);
+      }
       setAcademicYears(years);
       setSemesters(sems);
     } catch (err) {
       console.error('Error loading academic data:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   };
 
+  const updateSettingField = <K extends keyof SystemSettings>(
+    field: K,
+    value: SystemSettings[K]
+  ) => {
+    isSettingsDirtyRef.current = true;
+    setSettings((prev) => (prev ? { ...prev, [field]: value } : prev));
+  };
+
   useEffect(() => {
-    loadData();
+    void loadData(false);
     void checkSupabaseConnection();
   }, []);
 
   useRealtimeSync(['simpel_settings', 'simpel_academic_years', 'simpel_semesters'], () => {
-    void loadData();
+    void loadData(true);
   });
 
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -245,6 +260,8 @@ export const AcademicSettingsPage: React.FC = () => {
     setStatusMessage(null);
     try {
       const updated = await academicService.updateSettings(settings);
+      isSettingsDirtyRef.current = false;
+      notifyDomFormSaved();
       setSettings(updated);
       setStatusMessage('Pengaturan madrasah berhasil disimpan.');
       setTimeout(() => setStatusMessage(null), 3000);
@@ -500,7 +517,7 @@ export const AcademicSettingsPage: React.FC = () => {
                 <input
                   type="text"
                   value={settings.school_name}
-                  onChange={(e) => setSettings({ ...settings, school_name: e.target.value })}
+                  onChange={(e) => updateSettingField('school_name', e.target.value)}
                   className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium text-slate-900"
                   required
                 />
@@ -511,7 +528,7 @@ export const AcademicSettingsPage: React.FC = () => {
                 <input
                   type="text"
                   value={settings.nsm}
-                  onChange={(e) => setSettings({ ...settings, nsm: e.target.value })}
+                  onChange={(e) => updateSettingField('nsm', e.target.value)}
                   className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                   required
                 />
@@ -522,7 +539,7 @@ export const AcademicSettingsPage: React.FC = () => {
                 <input
                   type="text"
                   value={settings.npsn}
-                  onChange={(e) => setSettings({ ...settings, npsn: e.target.value })}
+                  onChange={(e) => updateSettingField('npsn', e.target.value)}
                   className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                   required
                 />
@@ -535,7 +552,7 @@ export const AcademicSettingsPage: React.FC = () => {
                   min="50"
                   max="100"
                   value={settings.kktp_default}
-                  onChange={(e) => setSettings({ ...settings, kktp_default: Number(e.target.value) })}
+                  onChange={(e) => updateSettingField('kktp_default', Number(e.target.value))}
                   className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                   required
                 />
@@ -546,7 +563,7 @@ export const AcademicSettingsPage: React.FC = () => {
                 <input
                   type="text"
                   value={settings.principal_name}
-                  onChange={(e) => setSettings({ ...settings, principal_name: e.target.value })}
+                  onChange={(e) => updateSettingField('principal_name', e.target.value)}
                   className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                   required
                 />
@@ -557,7 +574,7 @@ export const AcademicSettingsPage: React.FC = () => {
                 <input
                   type="text"
                   value={settings.principal_nip}
-                  onChange={(e) => setSettings({ ...settings, principal_nip: e.target.value })}
+                  onChange={(e) => updateSettingField('principal_nip', e.target.value)}
                   className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                   required
                 />
@@ -569,7 +586,7 @@ export const AcademicSettingsPage: React.FC = () => {
               <textarea
                 rows={2}
                 value={settings.address}
-                onChange={(e) => setSettings({ ...settings, address: e.target.value })}
+                onChange={(e) => updateSettingField('address', e.target.value)}
                 className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                 required
               />
@@ -580,7 +597,7 @@ export const AcademicSettingsPage: React.FC = () => {
                 <input
                   type="checkbox"
                   checked={settings.is_report_card_locked}
-                  onChange={(e) => setSettings({ ...settings, is_report_card_locked: e.target.checked })}
+                  onChange={(e) => updateSettingField('is_report_card_locked', e.target.checked)}
                   className="w-4 h-4 text-emerald-700 rounded border-slate-300 focus:ring-emerald-500"
                 />
                 <span className="text-xs font-medium text-slate-800">

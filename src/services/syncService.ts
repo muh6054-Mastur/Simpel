@@ -32,6 +32,7 @@ export interface SyncStatusSnapshot {
   pendingCount: number;
   supabaseStatus: SupabaseHealthStatus;
   supabaseError: string | null;
+  localServerAvailable: boolean;
 }
 
 const LOCAL_ONLY_KEYS = new Set<string>([
@@ -96,6 +97,8 @@ class RealtimeSyncService {
   private lastKnownValues = new Map<string, string | null>();
   private cloudPullInFlight = false;
   private deferredKeysInFlight = new Set<string>();
+  private cloudConnected = false;
+  private localBackendUnsupported = false;
 
   private supabaseStatus: SupabaseHealthStatus = getSupabaseHealth().status;
   private supabaseError: string | null = getSupabaseHealth().message;
@@ -349,8 +352,15 @@ class RealtimeSyncService {
           mutations: batch,
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        if (res.status === 404 || res.status === 405 || !contentType.includes('application/json')) {
+          this.localBackendUnsupported = true;
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
       const json = await res.json();
+      this.localBackendUnsupported = false;
       if (typeof json.revision === 'number') {
         this.lastRevision = Math.max(this.lastRevision, json.revision);
       }
@@ -365,8 +375,7 @@ class RealtimeSyncService {
           this.pendingMutations.set(m.key, { value: m.value, updatedAt: m.updatedAt });
         }
       });
-      this.status = navigator.onLine ? 'reconnecting' : 'offline';
-      this.emitStatus();
+      this.updateConnectionStatus();
       console.warn('[Sync] Batch deferred for retry:', err);
     }
   }
@@ -426,11 +435,21 @@ class RealtimeSyncService {
       if (smallRows.length > 0) {
         const { error: smallErr } = await supabase.from('app_sync_state').upsert(smallRows, { onConflict: 'key' });
         reportSupabaseOutcome(smallErr);
+        if (!smallErr) {
+          this.cloudConnected = true;
+          this.lastSyncedAt = new Date().toISOString();
+          this.updateConnectionStatus();
+        }
         if (smallErr && !isSupabaseAvailable()) return;
       }
       for (const lr of largeRows) {
         const { error: lrErr } = await supabase.from('app_sync_state').upsert(lr, { onConflict: 'key' });
         reportSupabaseOutcome(lrErr);
+        if (!lrErr) {
+          this.cloudConnected = true;
+          this.lastSyncedAt = new Date().toISOString();
+          this.updateConnectionStatus();
+        }
         if (lrErr && !isSupabaseAvailable()) return;
       }
     } catch (err) {
@@ -627,7 +646,15 @@ class RealtimeSyncService {
         .select('key, revision, updated_at');
 
       reportSupabaseOutcome(metaErr);
-      if (metaErr || !Array.isArray(metaRows) || metaRows.length === 0) {
+      if (metaErr) {
+        this.cloudConnected = false;
+        this.updateConnectionStatus();
+        return false;
+      }
+      this.cloudConnected = true;
+      this.lastSyncedAt = this.lastSyncedAt || new Date().toISOString();
+      this.updateConnectionStatus();
+      if (!Array.isArray(metaRows) || metaRows.length === 0) {
         return false;
       }
 
@@ -819,7 +846,7 @@ class RealtimeSyncService {
 
     try {
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 15000);
+      const timeout = window.setTimeout(() => controller.abort(), useFast ? 6000 : 12000);
       const params = new URLSearchParams();
       if (sinceRevision > 0) params.set('since', String(sinceRevision));
       if (useFast) params.set('priority', 'fast');
@@ -831,7 +858,14 @@ class RealtimeSyncService {
       });
       window.clearTimeout(timeout);
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        if (res.status === 404 || res.status === 405 || !contentType.includes('application/json')) {
+          this.localBackendUnsupported = true;
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
+      this.localBackendUnsupported = false;
       const data = await res.json();
 
       if (typeof data.activeClients === 'number') {
@@ -1065,7 +1099,12 @@ class RealtimeSyncService {
   private updateConnectionStatus(): void {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       this.status = 'offline';
-    } else if (this.ws?.readyState === WebSocket.OPEN || this.httpConnected) {
+    } else if (
+      this.ws?.readyState === WebSocket.OPEN ||
+      this.httpConnected ||
+      (isSupabaseAvailable() && this.cloudConnected) ||
+      (this.localBackendUnsupported && !isSupabaseAvailable())
+    ) {
       this.status = 'connected';
     } else {
       this.status = 'reconnecting';
@@ -1074,13 +1113,20 @@ class RealtimeSyncService {
   }
 
   private setupSSEFallback(): void {
-    if (typeof EventSource === 'undefined' || this.sse) return;
+    if (typeof EventSource === 'undefined' || this.sse || this.localBackendUnsupported) return;
     try {
       const sse = new EventSource(`/api/sync/stream?clientId=${encodeURIComponent(this.clientId)}`);
       this.sse = sse;
       sse.onopen = () => {
+        this.localBackendUnsupported = false;
         this.httpConnected = true;
         this.updateConnectionStatus();
+      };
+      sse.onerror = () => {
+        if (this.localBackendUnsupported) {
+          sse.close();
+          this.sse = null;
+        }
       };
       sse.onmessage = (event) => {
         try {
@@ -1111,7 +1157,11 @@ class RealtimeSyncService {
         if (this.pendingMutations.size > 0) {
           await this.flushMutations();
         }
-        await this.pullFromServer(this.lastRevision, { priorityFast: false });
+        if (!this.localBackendUnsupported) {
+          await this.pullFromServer(this.lastRevision, { priorityFast: false });
+        } else if (isSupabaseAvailable()) {
+          await this.pullFromSupabaseCloud({ fastOnly: false, hydrateLocalServer: false });
+        }
       }
       const hasLiveStream =
         this.ws?.readyState === WebSocket.OPEN ||
@@ -1128,7 +1178,7 @@ class RealtimeSyncService {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectTimer !== null) return;
+    if (this.reconnectTimer !== null || this.localBackendUnsupported) return;
     const delay = Math.min(5000, 350 * Math.pow(1.6, this.reconnectAttempts));
     this.reconnectAttempts++;
     this.reconnectTimer = window.setTimeout(() => {
@@ -1145,7 +1195,7 @@ class RealtimeSyncService {
         .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
           if (!isSupabaseAvailable()) return;
           if (payload.table === 'app_sync_state') {
-            void this.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: true });
+            void this.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: !this.localBackendUnsupported });
           }
           window.dispatchEvent(
             new CustomEvent('simpel:remote-sync', {
@@ -1153,7 +1203,23 @@ class RealtimeSyncService {
             })
           );
         })
-        .subscribe();
+        .subscribe((subStatus) => {
+          if (subStatus === 'SUBSCRIBED') {
+            this.cloudConnected = true;
+            this.updateConnectionStatus();
+          }
+        });
+
+      supabase.auth.onAuthStateChange((event) => {
+        if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && isSupabaseAvailable()) {
+          void this.syncAllLocalToCloud();
+          void this.pullFromSupabaseCloud({
+            fastOnly: false,
+            hydrateLocalServer: !this.localBackendUnsupported,
+            force: true,
+          });
+        }
+      });
     } catch (err) {
       console.warn('[Sync] Supabase Realtime bridge skipped:', err);
     }
@@ -1165,31 +1231,41 @@ class RealtimeSyncService {
     this.bootstrapPromise = (async () => {
       if (typeof window === 'undefined') return;
 
-      // 1. Tarik data cepat (~22KB: akun, guru, siswa, kelas, dll) tanpa terblokir oleh logo/settings besar
-      await this.pullFromServer(0, { priorityFast: true });
-
-      // 2. Snapshot synced baseline & install transparent localStorage interceptor
+      // 1. Snapshot & interceptor lokal lebih dulu agar tidak ada mutasi terlewat
       this.snapshotLocalValues();
       this.installStorageInterceptor();
 
-      // 3. Jika Admin sudah punya sesi Supabase Auth aktif, sinkronkan state lokal ke cloud di latar belakang
+      // 2. Tarik data cepat (~22KB: akun, guru, siswa, kelas, dll) tanpa terblokir oleh logo/settings besar
+      await this.pullFromServer(0, { priorityFast: true });
+
+      // 3. Jika Supabase aktif, pastikan koneksi cloud diverifikasi & sinkronkan state lokal jika sesi auth aktif
       if (isSupabaseAvailable()) {
+        if (!this.cloudConnected) {
+          void this.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: !this.localBackendUnsupported });
+        }
         void this.syncAllLocalToCloud();
       }
 
       // 4. Establish WebSocket + SSE fallback + adaptive delta check + lifecycle hooks
-      this.connectWebSocket();
-      this.setupSSEFallback();
+      if (!this.localBackendUnsupported) {
+        this.connectWebSocket();
+        this.setupSSEFallback();
+      }
       this.startAdaptiveDeltaCheck();
       this.initSupabaseRealtimeBridge();
+      this.updateConnectionStatus();
 
       window.addEventListener('online', () => {
         this.wsConsecutiveFailures = 0;
         this.reconnectAttempts = 0;
         this.updateConnectionStatus();
         void this.flushMutations();
-        this.connectWebSocket();
-        void this.pullFromServer(this.lastRevision, { priorityFast: false });
+        if (!this.localBackendUnsupported) {
+          this.connectWebSocket();
+          void this.pullFromServer(this.lastRevision, { priorityFast: false });
+        } else if (isSupabaseAvailable()) {
+          void this.pullFromSupabaseCloud({ fastOnly: false, force: true });
+        }
       });
 
       window.addEventListener('offline', () => {
@@ -1199,10 +1275,14 @@ class RealtimeSyncService {
 
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
-          if ((!this.ws || this.ws.readyState !== WebSocket.OPEN) && this.wsConsecutiveFailures < this.maxWsFailures) {
-            this.connectWebSocket();
+          if (!this.localBackendUnsupported) {
+            if ((!this.ws || this.ws.readyState !== WebSocket.OPEN) && this.wsConsecutiveFailures < this.maxWsFailures) {
+              this.connectWebSocket();
+            }
+            void this.pullFromServer(this.lastRevision, { priorityFast: false });
+          } else if (isSupabaseAvailable()) {
+            void this.pullFromSupabaseCloud({ fastOnly: true });
           }
-          void this.pullFromServer(this.lastRevision, { priorityFast: false });
         }
       });
 
@@ -1218,6 +1298,7 @@ class RealtimeSyncService {
     this.emitStatus();
     this.wsConsecutiveFailures = 0;
     this.reconnectAttempts = 0;
+    this.localBackendUnsupported = false;
     if (isSupabaseConfigured) {
       resetSupabaseCircuitBreaker();
     }
@@ -1228,7 +1309,11 @@ class RealtimeSyncService {
     await this.pullFromServer(0, { priorityFast: false });
     if (isSupabaseAvailable()) {
       await this.syncAllLocalToCloud();
-      await this.pullFromSupabaseCloud({ fastOnly: false, hydrateLocalServer: true, force: true });
+      await this.pullFromSupabaseCloud({
+        fastOnly: false,
+        hydrateLocalServer: !this.localBackendUnsupported,
+        force: true,
+      });
     }
     window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys: ['*'], manual: true } }));
     window.dispatchEvent(new CustomEvent('simpel:remote-file-sync', { detail: { manual: true } }));
@@ -1259,6 +1344,7 @@ class RealtimeSyncService {
       pendingCount: this.pendingMutations.size,
       supabaseStatus: this.supabaseStatus,
       supabaseError: this.supabaseError,
+      localServerAvailable: !this.localBackendUnsupported,
     };
   }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { academicService } from '../../services/academicService';
 import { reportService, StudentSubjectScore, ClassLegerRow } from '../../services/reportService';
 import {
@@ -11,7 +11,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
-import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
 import {
   FileSpreadsheet,
   Award,
@@ -65,6 +65,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [editingDescStudentId, setEditingDescStudentId] = useState<string | null>(null);
+  const isLedgerDirtyRef = useRef<boolean>(false);
 
   const isTeacherRole = activeRole === 'guru';
   const isHomeroomRole = activeRole === 'wali_kelas';
@@ -168,7 +169,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     }
   };
 
-  const loadLedgerData = async () => {
+  const loadLedgerData = async (silent = false) => {
     if (!selectedClassId || (viewMode === 'per-mapel' && !selectedSubjectId)) {
       setSubjectScores([]);
       setOverallRows([]);
@@ -177,13 +178,17 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       return;
     }
 
-    setIsLoading(true);
+    if (!silent) {
+      setIsLoading(true);
+    }
     try {
       setIsLocked(reportService.isReportCardLocked(selectedClassId));
 
       if (viewMode === 'per-mapel') {
-        const scores = await reportService.getSubjectLedger(selectedClassId, selectedSubjectId);
-        setSubjectScores(scores);
+        if (!silent || !isLedgerDirtyRef.current) {
+          const scores = await reportService.getSubjectLedger(selectedClassId, selectedSubjectId);
+          setSubjectScores(scores);
+        }
       } else {
         const { subjects: sbjs, rows } = await reportService.getClassOverallLedger(selectedClassId);
         setOverallSubjects(sbjs);
@@ -192,7 +197,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     } catch (err) {
       console.error('Gagal memuat data leger nilai:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -220,8 +227,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   }, [wsClassId, wsSubjectId, classes, subjects, assignments]);
 
   useEffect(() => {
+    isLedgerDirtyRef.current = false;
     if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
-      void loadLedgerData();
+      void loadLedgerData(false);
     } else {
       setSubjectScores([]);
       setOverallRows([]);
@@ -251,7 +259,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     () => {
       void loadBaseData().then(() => {
         if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
-          void loadLedgerData();
+          void loadLedgerData(true);
         }
       });
     }
@@ -264,6 +272,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     value: number
   ) => {
     if (isLocked) return;
+    isLedgerDirtyRef.current = true;
 
     const kktpVal = Number(settings?.kktp_default ?? 75);
     const subjName =
@@ -328,6 +337,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     text: string
   ) => {
     if (isLocked) return;
+    isLedgerDirtyRef.current = true;
     setSubjectScores((prev) =>
       prev.map((item) =>
         item.studentId === studentId
@@ -339,6 +349,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   const handleResetStudentDesc = (studentId: string) => {
     if (isLocked) return;
+    isLedgerDirtyRef.current = true;
     const kktpVal = Number(settings?.kktp_default ?? 75);
     const subjName =
       availableSubjectsForClass.find((s) => s.id === selectedSubjectId)?.name ||
@@ -410,6 +421,8 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     setSubjectScores(regenerated);
     setEditingDescStudentId(null);
     await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, regenerated, false);
+    isLedgerDirtyRef.current = false;
+    notifyDomFormSaved();
     setStatusMessage('Rumusan Capaian Kompetensi seluruh siswa telah disinkronkan ulang sesuai nilai perolehan.');
     setTimeout(() => setStatusMessage(null), 3500);
   };
@@ -419,6 +432,8 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     setIsSaving(true);
     try {
       await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, subjectScores, true);
+      isLedgerDirtyRef.current = false;
+      notifyDomFormSaved();
       setStatusMessage('Data nilai leger mata pelajaran berhasil disimpan dan siap masuk ke Buku Rapor.');
       setTimeout(() => setStatusMessage(null), 3500);
     } catch (err) {

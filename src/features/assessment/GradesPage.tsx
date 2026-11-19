@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { assessmentService } from '../../services/assessmentService';
 import { academicService } from '../../services/academicService';
 import { reportService } from '../../services/reportService';
@@ -17,7 +17,7 @@ import { EvaluationScopeKey } from '../../types/curriculum.types';
 import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
-import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
 import {
   Award,
   Plus,
@@ -106,6 +106,12 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   // Input Map: studentId -> { score: number, feedback: string }
   const [scoreInputs, setScoreInputs] = useState<Record<string, { score: number; feedback: string }>>({});
 
+  const dirtyStudentIdsRef = useRef<Set<string>>(new Set());
+  const selectedAssessmentIdRef = useRef<string>(selectedAssessmentId);
+  selectedAssessmentIdRef.current = selectedAssessmentId;
+  const showFormModalRef = useRef<boolean>(showFormModal);
+  showFormModalRef.current = showFormModal;
+
   const effectiveSubjectId = scopeContext?.subjectId || selectedSubjectId || '';
   const effectiveClassId = scopeContext?.classId || selectedClassId || '';
   const effectiveAssignmentId = scopeContext?.assignmentId || selectedAssignmentId || '';
@@ -178,8 +184,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     [getStudentsForAssessment]
   );
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) {
+      setIsLoading(true);
+    }
     try {
       const [asms, asgs, stds, members, teacher, sys, tchs] = await Promise.all([
         assessmentService.getAssessments(),
@@ -193,7 +201,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
       setResolvedTeacher(teacher);
       setSettings(sys);
-      if (sys?.kktp_default) setFormKktp(Number(sys.kktp_default));
+      if (sys?.kktp_default && (!silent || !showFormModalRef.current)) {
+        setFormKktp(Number(sys.kktp_default));
+      }
 
       const scopedAsgs =
         activeRole === 'guru'
@@ -218,7 +228,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
             (!effectiveClassId || a.class_id === effectiveClassId)
         ) ||
         scopedAsgs[0];
-      if (defaultAsg) setFormAssignmentId(defaultAsg.id);
+      if (defaultAsg && (!silent || !showFormModalRef.current)) {
+        setFormAssignmentId(defaultAsg.id);
+      }
 
       const matchingContextAsms = scopedAsms.filter((a) => {
         const linked = a.assignment || scopedAsgs.find((asg) => asg.id === a.assignment_id);
@@ -230,29 +242,44 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       });
 
       const candidatePool = onlyActiveContext && effectiveSubjectId ? matchingContextAsms : scopedAsms;
+      const currentSelectedId = selectedAssessmentIdRef.current;
 
       if (candidatePool.length > 0) {
         const targetAsm =
-          candidatePool.find((a) => a.id === selectedAssessmentId) ||
+          candidatePool.find((a) => a.id === currentSelectedId) ||
           (scopeContext?.scopeKey
             ? candidatePool.find((a) => a.scope_key === scopeContext.scopeKey)
             : undefined) ||
           candidatePool[0];
-        setSelectedAssessmentId(targetAsm.id);
+        if (targetAsm.id !== currentSelectedId) {
+          dirtyStudentIdsRef.current.clear();
+          setSelectedAssessmentId(targetAsm.id);
+        }
 
         const grds = await assessmentService.getGrades(targetAsm.id);
         setGrades(grds);
-        setScoreInputs(
-          buildScoreInputsForAssessment(
-            targetAsm,
-            grds,
-            scopedAsgs,
-            stds,
-            members,
-            Number(sys?.kktp_default || 75)
-          )
+        const freshMap = buildScoreInputsForAssessment(
+          targetAsm,
+          grds,
+          scopedAsgs,
+          stds,
+          members,
+          Number(sys?.kktp_default || 75)
         );
+        setScoreInputs((prev) => {
+          if (!silent || dirtyStudentIdsRef.current.size === 0 || targetAsm.id !== currentSelectedId) {
+            return freshMap;
+          }
+          const merged = { ...freshMap };
+          dirtyStudentIdsRef.current.forEach((studentId) => {
+            if (prev[studentId]) {
+              merged[studentId] = prev[studentId];
+            }
+          });
+          return merged;
+        });
       } else {
+        dirtyStudentIdsRef.current.clear();
         setSelectedAssessmentId('');
         setGrades([]);
         setScoreInputs({});
@@ -260,7 +287,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     } catch (err) {
       console.error('Gagal memuat data penilaian:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   }, [
     activeRole,
@@ -277,7 +306,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   ]);
 
   useEffect(() => {
-    void loadData();
+    void loadData(false);
   }, [loadData]);
 
   useRealtimeSync(
@@ -294,7 +323,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     ],
     () => {
       setScopeVersion((v) => v + 1);
-      void loadData();
+      void loadData(true);
     }
   );
 
@@ -421,6 +450,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       });
     }
     try {
+      dirtyStudentIdsRef.current.clear();
       const grds = await assessmentService.getGrades(asmId);
       setGrades(grds);
       setScoreInputs(
@@ -656,6 +686,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   };
 
   const handleScoreChange = (studentId: string, val: number) => {
+    dirtyStudentIdsRef.current.add(studentId);
     const safeVal = Number.isNaN(val) ? 0 : Math.min(100, Math.max(0, val));
     setScoreInputs((prev) => ({
       ...prev,
@@ -667,6 +698,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   };
 
   const handleFeedbackChange = (studentId: string, text: string) => {
+    dirtyStudentIdsRef.current.add(studentId);
     setScoreInputs((prev) => ({
       ...prev,
       [studentId]: {
@@ -687,6 +719,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     const numericVal = uniformScore.trim() === '' ? currentKktp : Math.min(100, Math.max(0, Number(uniformScore)));
     if (Number.isNaN(numericVal)) return;
 
+    displayedStudents.forEach((s) => dirtyStudentIdsRef.current.add(s.id));
     setScoreInputs((prev) => {
       const next = { ...prev };
       displayedStudents.forEach((s) => {
@@ -711,6 +744,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       }));
 
       await assessmentService.saveGrades(currentAsm.id, entries);
+      dirtyStudentIdsRef.current.clear();
+      notifyDomFormSaved();
       const grds = await assessmentService.getGrades(currentAsm.id);
       setGrades(grds);
 

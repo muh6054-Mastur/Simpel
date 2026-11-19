@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAppSettings } from '../../context/AppSettingsContext';
 import { syncService } from '../../services/syncService';
 import { academicService } from '../../services/academicService';
 import { detectSupabaseQuotaError } from '../../lib/supabaseClient';
+import { notifyDomFormSaved } from '../../hooks/useRealtimeSync';
 import {
   School,
   Save,
@@ -43,9 +44,10 @@ export const InstitutionSettingsPage: React.FC = () => {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isDirtyRef = useRef(false);
 
   useEffect(() => {
-    if (!settings) return;
+    if (!settings || isDirtyRef.current) return;
     setSchoolName(settings.school_name || "MI Ma'arif Al Ihsan Soborejo");
     setAddress(settings.address || 'Soborejo, Pringsurat, Temanggung, Jawa Tengah');
     setPrincipalName(settings.principal_name || 'MUIN, S.Pd.I');
@@ -113,6 +115,7 @@ export const InstitutionSettingsPage: React.FC = () => {
     reader.onload = async (uploadEvent) => {
       const rawUri = uploadEvent.target?.result as string;
       const optimized = await optimizeImageDataUrl(rawUri, type === 'logo' ? 320 : 96);
+      isDirtyRef.current = true;
       if (type === 'logo') {
         setCustomLogo(optimized);
       } else {
@@ -152,6 +155,8 @@ export const InstitutionSettingsPage: React.FC = () => {
       });
 
       await syncService.flushMutations();
+      isDirtyRef.current = false;
+      notifyDomFormSaved();
 
       const cloudErr = academicService.getLastCloudSyncError();
       if (cloudErr) {
@@ -176,6 +181,8 @@ export const InstitutionSettingsPage: React.FC = () => {
     setConfirmingReset(false);
     await resetToDefaultBrand();
     await syncService.flushMutations();
+    isDirtyRef.current = false;
+    notifyDomFormSaved();
     setCustomLogo('/logo-mi-alihsan.svg');
     setCustomFavicon('/favicon.svg');
     setStatusMessage('Logo dan Favicon dikembalikan ke standar awal.');
@@ -323,7 +330,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={schoolName}
-                onChange={(e) => setSchoolName(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setSchoolName(e.target.value);
+                }}
                 className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 font-semibold text-slate-900"
                 required
               />
@@ -334,7 +344,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={nsm}
-                onChange={(e) => setNsm(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setNsm(e.target.value);
+                }}
                 className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                 required
               />
@@ -345,7 +358,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={npsn}
-                onChange={(e) => setNpsn(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setNpsn(e.target.value);
+                }}
                 className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                 required
               />
@@ -358,7 +374,10 @@ export const InstitutionSettingsPage: React.FC = () => {
                 min="50"
                 max="100"
                 value={kktpDefault}
-                onChange={(e) => setKktpDefault(Number(e.target.value))}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setKktpDefault(Number(e.target.value));
+                }}
                 className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900 font-bold"
                 required
               />
@@ -370,7 +389,10 @@ export const InstitutionSettingsPage: React.FC = () => {
             <textarea
               rows={2}
               value={address}
-              onChange={(e) => setAddress(e.target.value)}
+              onChange={(e) => {
+                isDirtyRef.current = true;
+                setAddress(e.target.value);
+              }}
               className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
               required
             />
@@ -390,7 +412,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={principalName}
-                onChange={(e) => setPrincipalName(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setPrincipalName(e.target.value);
+                }}
                 className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900 font-semibold"
                 required
               />
@@ -401,7 +426,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={principalNip}
-                onChange={(e) => setPrincipalNip(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setPrincipalNip(e.target.value);
+                }}
                 className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
                 required
               />
@@ -412,7 +440,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={curriculumName}
-                onChange={(e) => setCurriculumName(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setCurriculumName(e.target.value);
+                }}
                 className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
               />
             </div>
@@ -422,7 +453,10 @@ export const InstitutionSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={learningApproach}
-                onChange={(e) => setLearningApproach(e.target.value)}
+                onChange={(e) => {
+                  isDirtyRef.current = true;
+                  setLearningApproach(e.target.value);
+                }}
                 className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
               />
             </div>
@@ -433,7 +467,10 @@ export const InstitutionSettingsPage: React.FC = () => {
             <input
               type="text"
               value={reportHeaderTitle}
-              onChange={(e) => setReportHeaderTitle(e.target.value)}
+              onChange={(e) => {
+                isDirtyRef.current = true;
+                setReportHeaderTitle(e.target.value);
+              }}
               className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900 font-mono"
             />
           </div>

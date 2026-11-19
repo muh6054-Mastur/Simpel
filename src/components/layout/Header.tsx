@@ -31,7 +31,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = React.memo(({ onToggleMobileNav, onNavigate, activeView }) => {
   const { user, activeRole, availableRoles, switchActiveRole, logout } = useAuth();
   const { isConnected: isDriveConnected, googleUser } = useGoogleDrive();
-  const { status: syncStatus, activeDevices, syncNow, supabaseStatus, supabaseError } = useSync();
+  const { status: syncStatus, activeDevices, syncNow, supabaseStatus, supabaseError, localServerAvailable } = useSync();
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isRoleMenuOpen, setIsRoleMenuOpen] = useState(false);
@@ -61,6 +61,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({ onToggleMobileNav, on
   const isCloudIssue = isSupabaseConfigured && (supabaseStatus === 'quota_exceeded' || supabaseStatus === 'error');
   const isHealthyConnected =
     syncStatus === 'connected' &&
+    (localServerAvailable || isSupabaseConfigured) &&
     (!isSupabaseConfigured || supabaseStatus === 'connected' || supabaseStatus === 'local_mode');
 
   return (
@@ -138,21 +139,27 @@ export const Header: React.FC<HeaderProps> = React.memo(({ onToggleMobileNav, on
               : syncStatus === 'offline'
               ? 'Mode Offline'
               : supabaseStatus === 'local_mode'
-              ? syncStatus === 'connected'
+              ? !localServerAvailable
+                ? 'Mode Lokal (Browser)'
+                : syncStatus === 'connected'
                 ? `Mode Server Lokal${activeDevices > 1 ? ` (${activeDevices})` : ''}`
                 : 'Mode Server Lokal'
               : supabaseStatus === 'quota_exceeded'
-              ? syncStatus === 'connected'
+              ? syncStatus === 'connected' && localServerAvailable
                 ? 'Sync Lokal · Kuota Cloud Penuh'
                 : 'Kuota Cloud Penuh'
               : supabaseStatus === 'error'
-              ? syncStatus === 'connected'
+              ? syncStatus === 'connected' && localServerAvailable
                 ? 'Sync Lokal · Cloud Gangguan'
                 : 'Koneksi Cloud Gangguan'
               : isSupabaseConfigured && syncStatus === 'connected'
-              ? 'Supabase Live + Sync'
+              ? localServerAvailable
+                ? 'Supabase Live + Sync'
+                : 'Supabase Live'
               : syncStatus === 'connected'
-              ? `Sinkron Real-Time${activeDevices > 1 ? ` (${activeDevices})` : ''}`
+              ? localServerAvailable
+                ? `Sinkron Real-Time${activeDevices > 1 ? ` (${activeDevices})` : ''}`
+                : 'Mode Lokal (Browser)'
               : 'Menyambungkan...'}
           </span>
         </button>

@@ -192,7 +192,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (!sessErr && session?.user?.id && session.user.id === user.id) {
             const refreshed = await fetchFullUserAccount(user.id, user.email);
             reportSupabaseOutcome();
-            setUser(refreshed);
+            if (JSON.stringify(refreshed) !== JSON.stringify(user)) {
+              setUser(refreshed);
+            }
             return;
           }
         } catch (supaErr) {
@@ -244,9 +246,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         homeroomClassId,
       };
 
-      setActiveRole(nextActiveRole);
-      setUser(updated);
-      localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
+      if (nextActiveRole !== activeRole) {
+        setActiveRole(nextActiveRole);
+      }
+      if (JSON.stringify(updated) !== JSON.stringify(user)) {
+        setUser(updated);
+        localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
+      }
     } catch (err: any) {
       console.warn('Gagal memuat ulang profil:', err?.message);
     }

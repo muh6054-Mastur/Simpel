@@ -49,12 +49,21 @@ export const AppSettingsProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const loadSettings = async () => {
     try {
       const data = await academicService.getSettings();
-      setSettings(data);
-      const fav = data.favicon_url || DEFAULT_FAVICON;
-      applyFaviconToDocument(fav);
+      let changed = false;
+      setSettings((prev) => {
+        if (prev && JSON.stringify(prev) === JSON.stringify(data)) {
+          return prev;
+        }
+        changed = true;
+        return data;
+      });
+      if (changed) {
+        const fav = data.favicon_url || DEFAULT_FAVICON;
+        applyFaviconToDocument(fav);
+      }
     } catch (e) {
       console.warn('Fallback loading system settings:', e);
-      setSettings(DEMO_SYSTEM_SETTINGS);
+      setSettings((prev) => prev || DEMO_SYSTEM_SETTINGS);
       applyFaviconToDocument(DEFAULT_FAVICON);
     }
   };
