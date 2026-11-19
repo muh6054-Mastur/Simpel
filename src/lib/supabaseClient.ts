@@ -46,11 +46,17 @@ export function createEphemeralSupabaseClient() {
   });
 }
 
+export const getSupabaseProjectRef = (): string | null => {
+  const match = String(supabaseUrl).match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i);
+  return match ? match[1] : null;
+};
+
 export const getSupabaseConfigStatus = () => ({
   isConfigured: isSupabaseConfigured,
   hasUrl: Boolean(supabaseUrl && supabaseUrl.startsWith('https://') && !supabaseUrl.includes('your-project-id')),
   hasKey: Boolean(supabaseAnonKey && !supabaseAnonKey.includes('mock-anon-key')),
   url: supabaseUrl ? supabaseUrl.replace(/https:\/\/(.*)\.supabase\.co.*/, 'https://***.supabase.co') : 'Belum diatur',
+  projectRef: getSupabaseProjectRef(),
 });
 
 export type SupabaseHealthStatus = 'unconfigured' | 'connected' | 'local_mode' | 'quota_exceeded' | 'error';

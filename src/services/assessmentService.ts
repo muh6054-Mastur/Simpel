@@ -202,13 +202,17 @@ export const assessmentService = {
 
     if (isSupabaseAvailable() && isUuid(id) && isUuid(payload.assignment_id)) {
       try {
-        const { assignment: _a, scope_key: _sk, ...dbAsm } = newAsm;
-        const { data, error } = await supabase.from('assessments').insert(dbAsm).select().single();
+        const { assignment: _a, ...dbAsm } = newAsm;
+        let { data, error } = await supabase.from('assessments').insert(dbAsm).select().single();
+        if (error && (error.code === 'PGRST204' || String(error.message || '').includes('scope_key'))) {
+          const { scope_key: _sk, ...legacyDbAsm } = dbAsm;
+          ({ data, error } = await supabase.from('assessments').insert(legacyDbAsm).select().single());
+        }
         reportSupabaseOutcome(error);
         if (!error && data) {
           newAsm = {
             ...(data as Assessment),
-            scope_key: payload.scope_key ?? null,
+            scope_key: (data as Assessment).scope_key ?? payload.scope_key ?? null,
             assignment: matchedAssignment,
           };
         }
@@ -254,8 +258,19 @@ export const assessmentService = {
         if (patch.assignment_id !== undefined && isUuid(patch.assignment_id)) {
           dbPatch.assignment_id = patch.assignment_id;
         }
+        if (patch.scope_key !== undefined) {
+          dbPatch.scope_key = patch.scope_key;
+        }
         if (Object.keys(dbPatch).length > 0) {
-          const { error } = await supabase.from('assessments').update(dbPatch).eq('id', id);
+          let { error } = await supabase.from('assessments').update(dbPatch).eq('id', id);
+          if (error && 'scope_key' in dbPatch && (error.code === 'PGRST204' || String(error.message || '').includes('scope_key'))) {
+            const { scope_key: _sk, ...legacyPatch } = dbPatch;
+            if (Object.keys(legacyPatch).length > 0) {
+              ({ error } = await supabase.from('assessments').update(legacyPatch).eq('id', id));
+            } else {
+              error = null;
+            }
+          }
           reportSupabaseOutcome(error);
         }
       } catch (err) {

@@ -14,6 +14,9 @@ export interface ActivityLog {
 
 const STORAGE_KEY = 'simpel_mi_activity_logs';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
+
 export const activityLogService = {
   async log(entry: Omit<ActivityLog, 'id' | 'timestamp'>): Promise<void> {
     const newEntry: ActivityLog = {
@@ -33,17 +36,27 @@ export const activityLogService = {
       // ignore
     }
 
-    // Attempt Supabase insert if audit table exists
+    // Attempt Supabase insert using exact schema columns (action_name, entity_name, details jsonb)
     if (isSupabaseAvailable()) {
       try {
+        let resolvedUserId: string | null = isUuid(entry.userId) ? entry.userId! : null;
+        if (!resolvedUserId) {
+          const { data: sessionData } = await supabase.auth.getSession();
+          const authUid = sessionData?.session?.user?.id;
+          if (isUuid(authUid)) resolvedUserId = authUid!;
+        }
+        if (!resolvedUserId) return;
+
         const { error } = await supabase.from('activity_logs').insert([
           {
-            user_id: entry.userId,
-            user_name: entry.userName,
-            user_role: entry.userRole,
-            action: entry.action,
-            module: entry.module,
-            details: entry.details,
+            user_id: resolvedUserId,
+            action_name: entry.action,
+            entity_name: entry.module,
+            details: {
+              userName: entry.userName,
+              userRole: entry.userRole,
+              description: entry.details || null,
+            },
             created_at: newEntry.timestamp,
           },
         ]);

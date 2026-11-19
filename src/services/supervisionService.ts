@@ -113,20 +113,35 @@ export const supervisionService = {
       isSupabaseAvailable() &&
       isUuid(id) &&
       isUuid(payload.teacher_id) &&
-      isUuid(payload.class_id) &&
-      isUuid(payload.subject_id)
+      isUuid(payload.academic_year_id) &&
+      isUuid(payload.semester_id)
     ) {
       try {
-        const { teacher: _t, class: _c, subject: _s, supervisor: _sup, results: _res, followups: _f, ...dbPayload } = newRecord;
-        const { data, error } = await supabase.from('supervision_records').insert(dbPayload).select().single();
-        reportSupabaseOutcome(error);
-        if (!error && data) {
-          newRecord = {
-            ...(data as SupervisionRecord),
-            teacher: newRecord.teacher,
-            class: newRecord.class,
-            subject: newRecord.subject,
+        let supervisorId = isUuid(payload.supervisor_id) ? payload.supervisor_id : '';
+        if (!supervisorId) {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (isUuid(sessionData?.session?.user?.id)) supervisorId = sessionData!.session!.user!.id;
+        }
+        if (isUuid(supervisorId)) {
+          const { teacher: _t, class: _c, subject: _s, supervisor: _sup, results: _res, followups: _f, ...rawDbPayload } = newRecord;
+          const dbPayload = {
+            ...rawDbPayload,
+            supervisor_id: supervisorId,
+            instrument_id: isUuid(rawDbPayload.instrument_id) ? rawDbPayload.instrument_id : null,
+            class_id: isUuid(rawDbPayload.class_id) ? rawDbPayload.class_id : null,
+            subject_id: isUuid(rawDbPayload.subject_id) ? rawDbPayload.subject_id : null,
+            assignment_id: isUuid(rawDbPayload.assignment_id) ? rawDbPayload.assignment_id : null,
           };
+          const { data, error } = await supabase.from('supervision_records').insert(dbPayload).select().single();
+          reportSupabaseOutcome(error);
+          if (!error && data) {
+            newRecord = {
+              ...(data as SupervisionRecord),
+              teacher: newRecord.teacher,
+              class: newRecord.class,
+              subject: newRecord.subject,
+            };
+          }
         }
       } catch (err) {
         reportSupabaseOutcome(err);

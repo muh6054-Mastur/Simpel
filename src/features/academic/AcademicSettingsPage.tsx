@@ -77,7 +77,7 @@ export const AcademicSettingsPage: React.FC = () => {
     hasAuthSession: false,
     authEmail: null,
     tablesReady: 0,
-    totalChecked: 9,
+    totalChecked: 25,
     isQuotaExceeded: false,
     errorMessage: null,
   });
@@ -98,7 +98,7 @@ export const AcademicSettingsPage: React.FC = () => {
         hasAuthSession: false,
         authEmail: null,
         tablesReady: 0,
-        totalChecked: 9,
+        totalChecked: 25,
         isQuotaExceeded: false,
         errorMessage: null,
       });
@@ -112,7 +112,7 @@ export const AcademicSettingsPage: React.FC = () => {
         hasAuthSession: false,
         authEmail: null,
         tablesReady: 0,
-        totalChecked: 9,
+        totalChecked: 25,
         isQuotaExceeded: false,
         errorMessage: 'Variabel lingkungan VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum diatur pada Secrets.',
       });
@@ -125,12 +125,28 @@ export const AcademicSettingsPage: React.FC = () => {
       'system_settings',
       'academic_years',
       'semesters',
+      'profiles',
+      'user_roles',
       'classes',
+      'subjects',
       'teachers',
       'students',
+      'class_members',
+      'teaching_assignments',
+      'homeroom_assignments',
+      'teaching_journals',
+      'student_attendance',
+      'assessments',
+      'grades',
+      'remedial_records',
+      'enrichment_records',
+      'document_links',
       'supervision_records',
+      'student_guidance_records',
       'notifications',
+      'activity_logs',
       'app_sync_state',
+      'app_user_credentials',
     ];
 
     try {
@@ -139,6 +155,8 @@ export const AcademicSettingsPage: React.FC = () => {
         ...tablesToCheck.map((tbl) =>
           tbl === 'app_sync_state'
             ? supabase.from(tbl).select('key', { count: 'exact', head: true })
+            : tbl === 'app_user_credentials'
+            ? supabase.from(tbl).select('email', { count: 'exact', head: true })
             : supabase.from(tbl).select('id', { count: 'exact', head: true })
         ),
       ]);
@@ -146,9 +164,13 @@ export const AcademicSettingsPage: React.FC = () => {
       const firstErr = results.find((r) => r.error)?.error || null;
       reportSupabaseOutcome(firstErr);
       const isQuotaExceeded = detectSupabaseQuotaError(firstErr);
+      const isMissingTableErr = (err: any) =>
+        err?.code === '42P01' ||
+        err?.code === 'PGRST205' ||
+        String(err?.message || '').toLowerCase().includes('could not find the table');
       const readyCount = isQuotaExceeded
         ? 0
-        : results.filter((r) => !r.error || r.error.code !== '42P01').length;
+        : results.filter((r) => !r.error || !isMissingTableErr(r.error)).length;
       setDbCheckState({
         checking: false,
         reachable: !isQuotaExceeded,
@@ -837,8 +859,9 @@ export const AcademicSettingsPage: React.FC = () => {
                         try {
                           await signInSupabaseStrict(supaAuthEmail, supaAuthPassword);
                           await refreshProfile();
+                          await syncService.syncNow();
                           await checkSupabaseConnection();
-                          setStatusMessage('Sesi Auth Supabase berhasil terhubung!');
+                          setStatusMessage('Sesi Auth Supabase berhasil terhubung & seluruh data disinkronkan ke cloud!');
                         } catch (err: any) {
                           setSupaAuthError(err?.message || 'Gagal masuk ke Supabase Auth.');
                         } finally {
@@ -893,13 +916,11 @@ export const AcademicSettingsPage: React.FC = () => {
                 </a>
 
                 <a
-                  href={(() => {
-                    const rawUrl = (import.meta.env && import.meta.env.VITE_SUPABASE_URL) || '';
-                    const match = String(rawUrl).match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i);
-                    return match
-                      ? `https://supabase.com/dashboard/project/${match[1]}/sql/new`
-                      : 'https://supabase.com/dashboard/projects';
-                  })()}
+                  href={
+                    supabaseStatus.projectRef
+                      ? `https://supabase.com/dashboard/project/${supabaseStatus.projectRef}/sql/new`
+                      : 'https://supabase.com/dashboard/projects'
+                  }
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-bold transition-colors"

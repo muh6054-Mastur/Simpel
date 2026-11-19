@@ -105,11 +105,16 @@ export const curriculumService = {
       isSupabaseAvailable() &&
       isUuid(id) &&
       isUuid(payload.teacher_id) &&
-      isUuid(payload.class_id) &&
-      isUuid(payload.subject_id)
+      isUuid(payload.academic_year_id) &&
+      isUuid(payload.semester_id)
     ) {
       try {
-        const { teacher: _t, class: _c, subject: _s, ...dbDoc } = newDoc;
+        const { teacher: _t, class: _c, subject: _s, ...rawDoc } = newDoc;
+        const dbDoc = {
+          ...rawDoc,
+          class_id: isUuid(rawDoc.class_id) ? rawDoc.class_id : null,
+          subject_id: isUuid(rawDoc.subject_id) ? rawDoc.subject_id : null,
+        };
         const { data, error } = await supabase.from('document_links').insert(dbDoc).select().single();
         reportSupabaseOutcome(error);
         if (!error && data) {
@@ -227,11 +232,18 @@ export const curriculumService = {
       reviewed_at: new Date().toISOString(),
     };
 
-    if (isSupabaseAvailable() && isUuid(documentId) && isUuid(reviewerId)) {
+    if (isSupabaseAvailable() && isUuid(documentId)) {
       try {
-        const { reviewer: _r, ...dbReview } = newReview;
-        const { error } = await supabase.from('document_reviews').insert(dbReview);
-        reportSupabaseOutcome(error);
+        let resolvedReviewerId = isUuid(reviewerId) ? reviewerId : '';
+        if (!resolvedReviewerId) {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (isUuid(sessionData?.session?.user?.id)) resolvedReviewerId = sessionData!.session!.user!.id;
+        }
+        if (isUuid(resolvedReviewerId)) {
+          const { reviewer: _r, ...dbReview } = { ...newReview, reviewed_by: resolvedReviewerId };
+          const { error } = await supabase.from('document_reviews').insert(dbReview);
+          reportSupabaseOutcome(error);
+        }
       } catch (err) {
         reportSupabaseOutcome(err);
         console.warn('Supabase reviewDocument fallback:', err);

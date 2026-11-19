@@ -21,6 +21,9 @@ function setLocal<T>(key: string, value: T): void {
   }
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
+
 export const attendanceService = {
   async getAttendance(filters: {
     classId?: string;
@@ -32,11 +35,11 @@ export const attendanceService = {
     if (isSupabaseAvailable()) {
       try {
         let query = supabase.from('student_attendance').select('*, student:students(*)');
-        if (filters.classId) query = query.eq('class_id', filters.classId);
+        if (filters.classId && isUuid(filters.classId)) query = query.eq('class_id', filters.classId);
         if (filters.date) query = query.eq('date', filters.date);
-        if (filters.studentId) query = query.eq('student_id', filters.studentId);
-        if (filters.academicYearId) query = query.eq('academic_year_id', filters.academicYearId);
-        if (filters.semesterId) query = query.eq('semester_id', filters.semesterId);
+        if (filters.studentId && isUuid(filters.studentId)) query = query.eq('student_id', filters.studentId);
+        if (filters.academicYearId && isUuid(filters.academicYearId)) query = query.eq('academic_year_id', filters.academicYearId);
+        if (filters.semesterId && isUuid(filters.semesterId)) query = query.eq('semester_id', filters.semesterId);
 
         const { data, error } = await query;
         reportSupabaseOutcome(error);
@@ -78,8 +81,13 @@ export const attendanceService = {
         (r) => r.student_id === entry.studentId && r.date === entry.date
       );
 
+      const generatedId =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
       const record: StudentAttendance = {
-        id: existingIdx >= 0 ? allRecords[existingIdx].id : `att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: existingIdx >= 0 && isUuid(allRecords[existingIdx].id) ? allRecords[existingIdx].id : generatedId,
         student_id: entry.studentId,
         class_id: entry.classId,
         date: entry.date,
@@ -101,21 +109,43 @@ export const attendanceService = {
 
     if (isSupabaseAvailable()) {
       try {
-        const { error } = await supabase.from('student_attendance').upsert(
-          newItems.map((item) => ({
-            id: item.id,
-            student_id: item.student_id,
-            class_id: item.class_id,
-            date: item.date,
-            status: item.status,
-            notes: item.notes,
-            recorded_by: item.recorded_by,
-            academic_year_id: item.academic_year_id,
-            semester_id: item.semester_id,
-          })),
-          { onConflict: 'student_id,date' }
-        );
-        reportSupabaseOutcome(error);
+        const { data: sessionData } = await supabase.auth.getSession();
+        const sessionUid = sessionData?.session?.user?.id;
+        const dbItems = newItems
+          .map((item) => {
+            const resolvedRecorder = isUuid(item.recorded_by)
+              ? item.recorded_by
+              : isUuid(sessionUid)
+              ? sessionUid!
+              : '';
+            return {
+              id: item.id,
+              student_id: item.student_id,
+              class_id: item.class_id,
+              date: item.date,
+              status: item.status,
+              notes: item.notes,
+              recorded_by: resolvedRecorder,
+              academic_year_id: item.academic_year_id,
+              semester_id: item.semester_id,
+            };
+          })
+          .filter(
+            (item) =>
+              isUuid(item.id) &&
+              isUuid(item.student_id) &&
+              isUuid(item.class_id) &&
+              isUuid(item.recorded_by) &&
+              isUuid(item.academic_year_id) &&
+              isUuid(item.semester_id)
+          );
+
+        if (dbItems.length > 0) {
+          const { error } = await supabase
+            .from('student_attendance')
+            .upsert(dbItems, { onConflict: 'student_id,date' });
+          reportSupabaseOutcome(error);
+        }
       } catch (err) {
         reportSupabaseOutcome(err);
         console.warn('Supabase recordAttendance fallback:', err);

@@ -21,6 +21,9 @@ function setLocal<T>(key: string, value: T): void {
   }
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
+
 export const guidanceService = {
   async getGuidanceRecords(userRole: string, currentUserId: string): Promise<StudentGuidanceRecord[]> {
     if (isSupabaseAvailable()) {
@@ -32,7 +35,14 @@ export const guidanceService = {
 
         // Enforce RLS restriction: regular teachers only see their own recorded records
         if (userRole !== 'admin' && userRole !== 'kepala_madrasah') {
-          query = query.eq('recorded_by', currentUserId);
+          let recorderId = isUuid(currentUserId) ? currentUserId : '';
+          if (!recorderId) {
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (isUuid(sessionData?.session?.user?.id)) recorderId = sessionData!.session!.user!.id;
+          }
+          if (recorderId) {
+            query = query.eq('recorded_by', recorderId);
+          }
         }
 
         const { data, error } = await query;
@@ -59,7 +69,7 @@ export const guidanceService = {
     payload: Omit<StudentGuidanceRecord, 'id' | 'created_at' | 'updated_at'>
   ): Promise<StudentGuidanceRecord> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `gd-${Date.now()}`;
-    const newRecord: StudentGuidanceRecord = {
+    let newRecord: StudentGuidanceRecord = {
       ...payload,
       id,
       created_at: new Date().toISOString(),
@@ -67,12 +77,21 @@ export const guidanceService = {
       student: DEMO_STUDENTS.find((s) => s.id === payload.student_id),
     };
 
-    if (isSupabaseAvailable()) {
+    if (isSupabaseAvailable() && isUuid(id) && isUuid(payload.student_id)) {
       try {
-        const { student: _s, recorder: _r, ...dbPayload } = newRecord;
-        const { data, error } = await supabase.from('student_guidance_records').insert(dbPayload).select().single();
-        reportSupabaseOutcome(error);
-        if (!error && data) return data as StudentGuidanceRecord;
+        let recordedBy = isUuid(payload.recorded_by) ? payload.recorded_by : '';
+        if (!recordedBy) {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (isUuid(sessionData?.session?.user?.id)) recordedBy = sessionData!.session!.user!.id;
+        }
+        if (isUuid(recordedBy)) {
+          const { student: _s, recorder: _r, ...dbPayload } = { ...newRecord, recorded_by: recordedBy };
+          const { data, error } = await supabase.from('student_guidance_records').insert(dbPayload).select().single();
+          reportSupabaseOutcome(error);
+          if (!error && data) {
+            newRecord = { ...(data as StudentGuidanceRecord), student: newRecord.student };
+          }
+        }
       } catch (err) {
         reportSupabaseOutcome(err);
         console.warn('Supabase createGuidanceRecord fallback:', err);
@@ -80,7 +99,7 @@ export const guidanceService = {
     }
 
     const current = getLocal<StudentGuidanceRecord[]>(STORAGE_KEY, DEMO_GUIDANCES);
-    const updated = [newRecord, ...current];
+    const updated = [newRecord, ...current.filter((r) => r.id !== newRecord.id)];
     setLocal(STORAGE_KEY, updated);
     return newRecord;
   },
@@ -96,7 +115,7 @@ export const guidanceService = {
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseAvailable()) {
+    if (isSupabaseAvailable() && isUuid(id)) {
       try {
         const { error } = await supabase.from('student_guidance_records').update({ status }).eq('id', id);
         reportSupabaseOutcome(error);
