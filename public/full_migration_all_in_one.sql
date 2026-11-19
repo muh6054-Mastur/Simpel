@@ -715,7 +715,11 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     role_val text;
     idx int := 0;
@@ -734,13 +738,13 @@ BEGIN
 
     IF lower(NEW.email) = 'alihsansoborejo@gmail.com' THEN
         INSERT INTO public.user_roles (user_id, role, is_primary)
-        VALUES (NEW.id, 'admin', TRUE)
+        VALUES (NEW.id, 'admin'::public.user_role_type, TRUE)
         ON CONFLICT (user_id, role) DO NOTHING;
     ELSIF jsonb_typeof(NEW.raw_user_meta_data->'roles') = 'array' THEN
         FOR role_val IN SELECT jsonb_array_elements_text(NEW.raw_user_meta_data->'roles') LOOP
             IF role_val IN ('guru', 'wali_kelas', 'kepala_madrasah') THEN
                 INSERT INTO public.user_roles (user_id, role, is_primary)
-                VALUES (NEW.id, role_val::user_role_type, idx = 0)
+                VALUES (NEW.id, role_val::public.user_role_type, idx = 0)
                 ON CONFLICT (user_id, role) DO NOTHING;
                 idx := idx + 1;
             END IF;
@@ -749,13 +753,13 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = NEW.id) THEN
         INSERT INTO public.user_roles (user_id, role, is_primary)
-        VALUES (NEW.id, 'guru', TRUE)
+        VALUES (NEW.id, 'guru'::public.user_role_type, TRUE)
         ON CONFLICT (user_id, role) DO NOTHING;
     END IF;
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
@@ -776,10 +780,71 @@ ON CONFLICT (id) DO UPDATE
 SET email = EXCLUDED.email;
 
 INSERT INTO public.user_roles (user_id, role, is_primary)
-SELECT au.id, 'admin'::user_role_type, TRUE
+SELECT au.id, 'admin'::public.user_role_type, TRUE
 FROM auth.users au
 WHERE lower(au.email) = 'alihsansoborejo@gmail.com'
 ON CONFLICT (user_id, role) DO NOTHING;
+
+INSERT INTO public.user_roles (user_id, role, is_primary)
+SELECT au.id, 'guru'::public.user_role_type, TRUE
+FROM auth.users au
+WHERE au.email IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id = au.id)
+ON CONFLICT (user_id, role) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.ensure_current_user_profile()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_uid UUID := auth.uid();
+    v_email TEXT;
+    v_full_name TEXT;
+    v_avatar TEXT;
+BEGIN
+    IF v_uid IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT
+        au.email,
+        COALESCE(au.raw_user_meta_data->>'full_name', split_part(au.email, '@', 1)),
+        au.raw_user_meta_data->>'avatar_url'
+    INTO v_email, v_full_name, v_avatar
+    FROM auth.users au
+    WHERE au.id = v_uid
+    LIMIT 1;
+
+    IF v_email IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
+    VALUES (v_uid, v_email, v_full_name, v_avatar, TRUE)
+    ON CONFLICT (id) DO UPDATE
+    SET email = EXCLUDED.email,
+        full_name = COALESCE(NULLIF(public.profiles.full_name, ''), EXCLUDED.full_name);
+
+    IF lower(v_email) = 'alihsansoborejo@gmail.com' THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (v_uid, 'admin'::public.user_role_type, TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = v_uid) THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (v_uid, 'guru'::public.user_role_type, TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    END IF;
+
+    RETURN TRUE;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.ensure_current_user_profile() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ensure_current_user_profile() TO authenticated;
 
 -- HELPER FUNCTIONS FOR RLS
 CREATE OR REPLACE FUNCTION public.has_role(target_role user_role_type)
@@ -1748,3 +1813,20 @@ BEGIN
         END IF;
     END IF;
 END $$;
+
+-- ==========================================
+-- BAGIAN 9: HAK AKSES SCHEMA & TABEL POSTGRESQL (WAJIB UNTUK PROYEK SUPABASE BARU)
+-- ==========================================
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+GRANT SELECT ON public.system_settings, public.app_sync_state TO anon;
+GRANT EXECUTE ON FUNCTION public.ensure_current_user_profile() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.has_role(public.user_role_type) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_principal() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_current_teacher_id() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_homeroom_of_class(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_teacher_of_assignment(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_student_taught_by_me(UUID) TO authenticated;
+
