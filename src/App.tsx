@@ -153,6 +153,19 @@ const MainAppContent: React.FC = () => {
     }
 
     if (
+      view === 'bimbingan-siswa' ||
+      view === 'kokurikuler' ||
+      view.startsWith('kokurikuler-')
+    ) {
+      return (
+        activeRole === 'guru' ||
+        activeRole === 'wali_kelas' ||
+        activeRole === 'admin' ||
+        activeRole === 'kepala_madrasah'
+      );
+    }
+
+    if (
       view.startsWith('eval-scope:') ||
       [
         'jurnal-mengajar',
@@ -176,13 +189,7 @@ const MainAppContent: React.FC = () => {
         'asesmen-nilai',
         'remedial-pengayaan',
         'analisis-nilai',
-        'bimbingan-siswa',
         'asisten-ai',
-        'kokurikuler',
-        'kokurikuler-perencanaan',
-        'kokurikuler-bahan-ajar',
-        'kokurikuler-asesmen',
-        'kokurikuler-administrasi',
       ].includes(view)
     ) {
       return activeRole === 'guru' || activeRole === 'admin' || activeRole === 'kepala_madrasah';

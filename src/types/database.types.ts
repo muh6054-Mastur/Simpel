@@ -452,6 +452,10 @@ export interface StudentGuidanceRecord {
   id: string;
   student_id: string;
   recorded_by: string;
+  teacher_id?: string | null;
+  recorder_user_id?: string | null;
+  recorder_name?: string | null;
+  recorder_email?: string | null;
   guidance_date: string;
   guidance_type: 'Belajar' | 'Sosial' | 'Perilaku' | 'Motivasi' | 'Keluarga';
   problem_description: string;

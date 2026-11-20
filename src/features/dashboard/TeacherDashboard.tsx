@@ -52,17 +52,29 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
 
   const loadData = async () => {
     try {
-      const [res, teacher, teachersPool] = await Promise.all([
+      const [res, teacher, teachersPool, allKoItems] = await Promise.all([
         fetchTeacherDashboardData(user?.teacherId, user),
         user ? academicService.resolveTeacherForUser(user) : Promise.resolve(null),
         academicService.getTeachers(),
+        kokurikulerService.fetchAll(),
       ]);
       setData(res);
 
-      const matchingIds = user
-        ? Array.from(academicService.getMatchingTeacherIdsForUser(user, teacher, teachersPool).candidateTeacherIds)
-        : [];
-      setKoKurikulerCounts(kokurikulerService.getCountsBySubMenu(matchingIds));
+      const { candidateTeacherIds, candidateUserIds } = user
+        ? academicService.getMatchingTeacherIdsForUser(user, teacher, teachersPool)
+        : { candidateTeacherIds: new Set<string>(), candidateUserIds: new Set<string>() };
+      setKoKurikulerCounts(
+        kokurikulerService.getCountsBySubMenu(
+          undefined,
+          {
+            teacherIds: Array.from(candidateTeacherIds),
+            userIds: Array.from(candidateUserIds),
+            email: user?.email,
+            fullName: user?.profile?.full_name,
+          },
+          allKoItems
+        )
+      );
 
       if (res.subjectsSummary.length > 0) {
         const preferredSubject =

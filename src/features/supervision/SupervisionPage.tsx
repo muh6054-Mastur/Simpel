@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { supervisionService } from '../../services/supervisionService';
 import { academicService } from '../../services/academicService';
 import {
@@ -19,14 +19,11 @@ import {
   Printer,
   Search,
   CheckCircle,
-  Clock,
   Sparkles,
   Heart,
-  ChevronRight,
-  UserCheck,
-  Filter,
-  FileSpreadsheet,
   AlertCircle,
+  Trash2,
+  MessageSquare,
 } from 'lucide-react';
 
 export const SupervisionPage: React.FC = () => {
@@ -38,7 +35,7 @@ export const SupervisionPage: React.FC = () => {
   const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [activeAcademicYearId, setActiveAcademicYearId] = useState<string>('');
-  const [activeAcademicYearName, setActiveAcademicYearName] = useState<string>('2025/2026');
+  const [activeAcademicYearName, setActiveAcademicYearName] = useState<string>('2026/2027');
   const [activeSemesterId, setActiveSemesterId] = useState<string>('');
   const [activeSemesterType, setActiveSemesterType] = useState<string>('Ganjil');
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -47,6 +44,15 @@ export const SupervisionPage: React.FC = () => {
   const [showFormModal, setShowFormModal] = useState<boolean>(false);
   const [selectedRecordDetail, setSelectedRecordDetail] = useState<SupervisionRecord | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  // Detail modal interactive states (Teacher acknowledgment & Followup)
+  const [teacherFeedbackInput, setTeacherFeedbackInput] = useState<string>('');
+  const [isSavingFeedback, setIsSavingFeedback] = useState<boolean>(false);
+  const [newFollowupDesc, setNewFollowupDesc] = useState<string>('');
+  const [newFollowupTarget, setNewFollowupTarget] = useState<string>('');
+  const [confirmDeleteRecordId, setConfirmDeleteRecordId] = useState<string | null>(null);
 
   // Form State: Formulir Supervisi Baru Langsung di Aplikasi
   const [teacherId, setTeacherId] = useState<string>('');
@@ -70,7 +76,7 @@ export const SupervisionPage: React.FC = () => {
 
   const isTeacherScoped = activeRole === 'guru' || activeRole === 'wali_kelas';
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
       const [recs, tchs, clss, sbjs, sysSettings, years, sems, teacher] = await Promise.all([
@@ -101,18 +107,31 @@ export const SupervisionPage: React.FC = () => {
       setActiveSemesterId(activeSem?.id || '');
       if (activeSem?.semester_type) setActiveSemesterType(activeSem.semester_type);
 
+      const { candidateTeacherIds, matchesTeacherRecord } = academicService.getMatchingTeacherIdsForUser(
+        user,
+        teacher,
+        tchs
+      );
+
       const scopedRecs = isTeacherScoped
-        ? teacher
-          ? recs.filter((r) => r.teacher_id === teacher.id)
-          : []
+        ? recs.filter(
+            (r) =>
+              candidateTeacherIds.has(r.teacher_id) ||
+              (r.teacher ? matchesTeacherRecord(r.teacher) : false)
+          )
         : recs;
 
-      const scopedTeachers = isTeacherScoped ? (teacher ? [teacher] : []) : tchs;
+      const scopedTeachers = isTeacherScoped
+        ? tchs.filter((t) => candidateTeacherIds.has(t.id) || matchesTeacherRecord(t))
+        : tchs;
 
       setRecords(scopedRecs);
       setTeachers(scopedTeachers);
-      if (isTeacherScoped && teacher) {
-        setTeacherFilter(teacher.id);
+      setSelectedRecordDetail((prev) =>
+        prev ? scopedRecs.find((item) => item.id === prev.id) || prev : null
+      );
+      if (isTeacherScoped && (teacher?.id || scopedTeachers[0]?.id)) {
+        setTeacherFilter('all');
       }
       setClasses(clss);
       setSubjects(sbjs);
@@ -124,11 +143,11 @@ export const SupervisionPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeRole, isTeacherScoped, user?.id, user?.email, user?.teacherId, user?.profile?.full_name]);
 
   useEffect(() => {
     void loadData();
-  }, [activeRole, user?.id]);
+  }, [loadData]);
 
   useRealtimeSync(
     [
@@ -140,6 +159,8 @@ export const SupervisionPage: React.FC = () => {
       'simpel_settings',
       'simpel_academic_years',
       'simpel_semesters',
+      'simpel_homeroom_assignments',
+      'simpel_users_cache_v2',
     ],
     () => {
       void loadData();
@@ -155,6 +176,13 @@ export const SupervisionPage: React.FC = () => {
 
   const handleCreateSupervision = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
+    if (!teacherId) {
+      setFormError('Pilih guru yang akan disupervisi terlebih dahulu.');
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
       const pred = calculatePredicate(totalScore);
       await supervisionService.createRecord({
@@ -191,11 +219,78 @@ export const SupervisionPage: React.FC = () => {
       });
 
       setShowFormModal(false);
-      setStatusMessage('Data formulir supervisi akademik berhasil disimpan ke database.');
-      loadData();
-      setTimeout(() => setStatusMessage(null), 3000);
-    } catch (err) {
+      setStatusMessage('Data formulir supervisi akademik berhasil disimpan & disinkronkan.');
+      await loadData();
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (err: any) {
       console.error('Gagal menyimpan supervisi:', err);
+      setFormError(err?.message || 'Gagal menyimpan formulir supervisi.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSaveTeacherFeedback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRecordDetail) return;
+    setIsSavingFeedback(true);
+    try {
+      const updated = await supervisionService.updateRecord(selectedRecordDetail.id, {
+        teacher_feedback: teacherFeedbackInput.trim() || 'Telah diterima dan dipahami untuk perbaikan KBM.',
+        teacher_acknowledged_at: new Date().toISOString(),
+      });
+      setSelectedRecordDetail(updated);
+      setStatusMessage('Konfirmasi & tanggapan guru atas hasil supervisi berhasil dikirim.');
+      await loadData();
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (err) {
+      console.error('Gagal mengirim tanggapan guru:', err);
+    } finally {
+      setIsSavingFeedback(false);
+    }
+  };
+
+  const handleAddFollowup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRecordDetail || !newFollowupDesc.trim()) return;
+    try {
+      await supervisionService.addFollowup(
+        selectedRecordDetail.id,
+        newFollowupDesc.trim(),
+        selectedRecordDetail.teacher?.full_name || 'Guru Pengampu',
+        newFollowupTarget || new Date().toISOString().split('T')[0]
+      );
+      setNewFollowupDesc('');
+      setNewFollowupTarget('');
+      await loadData();
+    } catch (err) {
+      console.error('Gagal menambahkan rencana tindak lanjut:', err);
+    }
+  };
+
+  const handleToggleFollowupStatus = async (
+    recordId: string,
+    followupId: string,
+    status: FollowupStatus
+  ) => {
+    try {
+      await supervisionService.updateFollowupStatus(recordId, followupId, status);
+      await loadData();
+    } catch (err) {
+      console.error('Gagal mengubah status tindak lanjut:', err);
+    }
+  };
+
+  const handleDeleteSupervision = async (id: string) => {
+    try {
+      await supervisionService.deleteRecord(id);
+      setConfirmDeleteRecordId(null);
+      setSelectedRecordDetail(null);
+      setStatusMessage('Catatan supervisi berhasil dihapus.');
+      await loadData();
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (err) {
+      console.error('Gagal menghapus data supervisi:', err);
     }
   };
 
@@ -516,8 +611,12 @@ export const SupervisionPage: React.FC = () => {
                     </td>
                     <td className="py-3 px-3.5 text-center print:hidden">
                       <button
-                        onClick={() => setSelectedRecordDetail(r)}
-                        className="px-2.5 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md border border-emerald-200 transition-colors"
+                        onClick={() => {
+                          setSelectedRecordDetail(r);
+                          setTeacherFeedbackInput(r.teacher_feedback || '');
+                          setConfirmDeleteRecordId(null);
+                        }}
+                        className="px-2.5 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md border border-emerald-200 transition-colors cursor-pointer"
                       >
                         Rincian
                       </button>
@@ -654,13 +753,155 @@ export const SupervisionPage: React.FC = () => {
                   </p>
                 </div>
               )}
+
+              {selectedRecordDetail.action_plan_summary && (
+                <div>
+                  <span className="font-bold text-slate-800">8. Ringkasan Rencana Tindak Lanjut:</span>
+                  <p className="text-slate-600 mt-0.5 leading-relaxed">
+                    {selectedRecordDetail.action_plan_summary}
+                  </p>
+                </div>
+              )}
+
+              {/* Bagian Tindak Lanjut & Tanggapan Guru */}
+              <div className="pt-2 border-t border-slate-100 space-y-2.5">
+                <span className="font-bold text-slate-800 block">
+                  Tindak Lanjut Pembinaan ({selectedRecordDetail.followups?.length || 0}):
+                </span>
+                {selectedRecordDetail.followups && selectedRecordDetail.followups.length > 0 && (
+                  <div className="space-y-1.5">
+                    {selectedRecordDetail.followups.map((fup) => (
+                      <div
+                        key={fup.id}
+                        className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-2"
+                      >
+                        <div>
+                          <p className="font-semibold text-slate-800">{fup.activity_description}</p>
+                          <p className="text-[11px] text-slate-500">
+                            PJ: {fup.person_in_charge} · Target: {fup.target_date || '-'}
+                          </p>
+                        </div>
+                        <select
+                          value={fup.status}
+                          onChange={(e) =>
+                            void handleToggleFollowupStatus(
+                              selectedRecordDetail.id,
+                              fup.id,
+                              e.target.value as FollowupStatus
+                            )
+                          }
+                          className="text-[11px] font-bold px-2 py-1 rounded border border-slate-300 bg-white"
+                        >
+                          <option value="Belum_Dilaksanakan">Belum Dilaksanakan</option>
+                          <option value="Dalam_Proses">Dalam Proses</option>
+                          <option value="Selesai">Selesai</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!isTeacherScoped && (
+                  <form onSubmit={handleAddFollowup} className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={newFollowupDesc}
+                      onChange={(e) => setNewFollowupDesc(e.target.value)}
+                      placeholder="Tambah rencana tindak lanjut pembinaan..."
+                      className="flex-1 text-xs px-2.5 py-1.5 rounded-lg border border-slate-300"
+                    />
+                    <input
+                      type="date"
+                      value={newFollowupTarget}
+                      onChange={(e) => setNewFollowupTarget(e.target.value)}
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white font-semibold text-xs shrink-0 cursor-pointer"
+                    >
+                      Tambah RTL
+                    </button>
+                  </form>
+                )}
+
+                {/* Tanggapan / Konfirmasi Guru */}
+                <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-emerald-950 flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Tanggapan &amp; Konfirmasi Guru</span>
+                    </span>
+                    {selectedRecordDetail.teacher_acknowledged_at && (
+                      <span className="text-[10px] font-semibold text-emerald-800">
+                        Dikonfirmasi:{' '}
+                        {new Date(selectedRecordDetail.teacher_acknowledged_at).toLocaleDateString('id-ID')}
+                      </span>
+                    )}
+                  </div>
+                  {isTeacherScoped ? (
+                    <form onSubmit={handleSaveTeacherFeedback} className="space-y-2">
+                      <textarea
+                        rows={2}
+                        value={teacherFeedbackInput}
+                        onChange={(e) => setTeacherFeedbackInput(e.target.value)}
+                        placeholder="Tuliskan refleksi atau konfirmasi tindak lanjut atas hasil supervisi ini..."
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-emerald-300 bg-white"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isSavingFeedback}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-[11px] disabled:opacity-50 cursor-pointer"
+                      >
+                        {isSavingFeedback ? 'Mengirim...' : 'Kirim Konfirmasi ke Kepala Madrasah'}
+                      </button>
+                    </form>
+                  ) : (
+                    <p className="text-slate-700 italic">
+                      {selectedRecordDetail.teacher_feedback || 'Guru belum memberikan tanggapan/konfirmasi.'}
+                    </p>
+                  )}
+                </div>
+              </div>
             </div>
 
-            <div className="flex justify-end pt-3 border-t border-slate-100">
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              {!isTeacherScoped ? (
+                confirmDeleteRecordId === selectedRecordDetail.id ? (
+                  <div className="inline-flex items-center gap-2">
+                    <span className="text-xs font-semibold text-rose-700">Hapus data ini?</span>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteSupervision(selectedRecordDetail.id)}
+                      className="px-3 py-1 rounded bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold cursor-pointer"
+                    >
+                      Ya, Hapus
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteRecordId(null)}
+                      className="px-3 py-1 rounded bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteRecordId(selectedRecordDetail.id)}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg font-semibold cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Catatan</span>
+                  </button>
+                )
+              ) : (
+                <div />
+              )}
               <button
                 type="button"
                 onClick={() => setSelectedRecordDetail(null)}
-                className="px-4 py-1.5 text-xs bg-slate-800 hover:bg-slate-900 text-white font-semibold rounded-lg shadow-xs"
+                className="px-4 py-1.5 text-xs bg-slate-800 hover:bg-slate-900 text-white font-semibold rounded-lg shadow-xs cursor-pointer"
               >
                 Tutup
               </button>
@@ -679,6 +920,13 @@ export const SupervisionPage: React.FC = () => {
             <p className="text-xs text-slate-500">
               Catat observasi KBM secara terstruktur tanpa perlu mengunggah file dokumen.
             </p>
+
+            {formError && (
+              <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleCreateSupervision} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -869,9 +1117,10 @@ export const SupervisionPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs disabled:opacity-50 cursor-pointer"
                 >
-                  Simpan Hasil Supervisi
+                  {isSubmitting ? 'Menyimpan...' : 'Simpan Hasil Supervisi'}
                 </button>
               </div>
             </form>

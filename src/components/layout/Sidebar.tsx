@@ -242,6 +242,15 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             ],
           },
           {
+            section: 'MONITORING & PEMBINAAN',
+            items: [
+              { id: 'kokurikuler-perencanaan', label: 'Monitoring Ko Kurikuler', icon: Compass },
+              { id: 'monitoring-kbm', label: 'Monitoring Jurnal KBM', icon: ClipboardList },
+              { id: 'supervisi-kbm', label: 'Supervisi Akademik & KBM', icon: Award },
+              { id: 'bimbingan-siswa', label: 'Bimbingan Siswa (BK)', icon: HeartHandshake },
+            ],
+          },
+          {
             section: 'AUDIT & OPERASIONAL',
             items: [
               { id: 'lapor-kendala', label: 'Evaluasi & Lapor Kendala', icon: LifeBuoy },
@@ -262,6 +271,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               { id: 'arsip-drive', label: 'Telaah Dokumen Kurikulum', icon: FolderSync },
               { id: 'penyimpanan-drive', label: 'Penyimpanan Google Drive', icon: HardDrive },
               { id: 'monitoring-kbm', label: 'Monitoring Jurnal KBM', icon: ClipboardList },
+              { id: 'kokurikuler-perencanaan', label: 'Monitoring Ko Kurikuler', icon: Compass },
+              { id: 'bimbingan-siswa', label: 'Bimbingan Siswa (BK)', icon: HeartHandshake },
             ],
           },
           {
@@ -295,6 +306,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               { id: 'perangkat-kelas', label: 'Perangkat & Struktur Kelas', icon: ShieldCheck },
               { id: 'monitoring-nilai-mapel', label: 'Monitoring Nilai Mapel', icon: Award },
               { id: 'rekap-presensi-kelas', label: 'Rekap Presensi Rombel', icon: CalendarCheck },
+              { id: 'kokurikuler-perencanaan', label: 'Ko Kurikuler Rombel', icon: Compass },
+              { id: 'bimbingan-siswa', label: 'Bimbingan Siswa (BK)', icon: HeartHandshake },
             ],
           },
           {
@@ -900,7 +913,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                     const Icon = item.icon;
                     const isActive =
                       activeView === item.id ||
-                      (item.id === 'penugasan-guru' && activeView.startsWith('penugasan-'));
+                      (item.id === 'penugasan-guru' && activeView.startsWith('penugasan-')) ||
+                      (item.id === 'kokurikuler-perencanaan' && activeView.startsWith('kokurikuler'));
 
                     return (
                       <button

@@ -76,6 +76,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
   const [allClasses, setAllClasses] = useState<ClassRoom[]>([]);
   const [allSubjects, setAllSubjects] = useState<Subject[]>([]);
   const [teacherAssignments, setTeacherAssignments] = useState<TeachingAssignment[]>([]);
+  const [allTeachers, setAllTeachers] = useState<Teacher[]>([]);
   const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [activeYearId, setActiveYearId] = useState<string>('ay-2026');
@@ -87,6 +88,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
   // Filter states
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('all');
   const [selectedSemesterFilter, setSelectedSemesterFilter] = useState<string>('all');
+  const [selectedTeacherFilter, setSelectedTeacherFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
 
   // Modal & Notification states
@@ -135,7 +137,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
     setIsLoading(true);
     void fileStorageService.hydrateConfigFromServer();
     try {
-      const [clss, sbjs, asgs, sys, years, sems, teacher, tchs] = await Promise.all([
+      const [clss, sbjs, asgs, sys, years, sems, teacher, tchs, allKoItems] = await Promise.all([
         academicService.getClasses(),
         academicService.getSubjects(),
         academicService.getTeachingAssignments(),
@@ -144,10 +146,12 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
         academicService.getSemesters(),
         academicService.resolveTeacherForUser(user),
         academicService.getTeachers(),
+        kokurikulerService.fetchAll(),
       ]);
 
       setAllClasses(clss);
       setAllSubjects(sbjs);
+      setAllTeachers(tchs);
       setSettings(sys);
       setResolvedTeacher(teacher);
 
@@ -160,24 +164,38 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
         setActiveSemesterType(actSem.semester_type);
       }
 
-      const relevantAsgs =
-        activeRole === 'guru'
-          ? academicService.filterAssignmentsForUser(asgs, user, teacher, tchs)
-          : asgs;
+      const isScopedRole = activeRole === 'guru' || activeRole === 'wali_kelas';
+      const relevantAsgs = isScopedRole
+        ? academicService.filterAssignmentsForUser(asgs, user, teacher, tchs)
+        : asgs;
       setTeacherAssignments(relevantAsgs);
 
-      const { candidateTeacherIds } = academicService.getMatchingTeacherIdsForUser(user, teacher, tchs);
-      const loadedItems =
-        activeRole === 'guru'
-          ? kokurikulerService.getByTeacherScope(Array.from(candidateTeacherIds))
-          : kokurikulerService.getAll();
+      const homeroomCls =
+        activeRole === 'wali_kelas'
+          ? await academicService.resolveHomeroomClassForUser(user, teacher)
+          : null;
+
+      const { candidateTeacherIds, candidateUserIds } = academicService.getMatchingTeacherIdsForUser(
+        user,
+        teacher,
+        tchs
+      );
+      const loadedItems = isScopedRole
+        ? kokurikulerService.filterByScope(allKoItems, {
+            teacherIds: Array.from(candidateTeacherIds),
+            userIds: Array.from(candidateUserIds),
+            email: user?.email,
+            fullName: user?.profile?.full_name,
+            homeroomClassLevel: homeroomCls?.level ?? null,
+          })
+        : allKoItems;
       setItems(loadedItems);
     } catch (err) {
       console.error('Gagal memuat data Ko Kurikuler:', err);
     } finally {
       setIsLoading(false);
     }
-  }, [activeRole, user?.id, user?.email, user?.teacherId, user?.profile?.full_name]);
+  }, [activeRole, user?.id, user?.email, user?.teacherId, user?.homeroomClassId, user?.profile?.full_name]);
 
   useEffect(() => {
     void loadData();
@@ -190,6 +208,11 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
       'simpel_classes',
       'simpel_teachers',
       'simpel_assignments',
+      'simpel_homeroom_assignments',
+      'simpel_curriculum_documents',
+      'simpel_academic_years',
+      'simpel_semesters',
+      'simpel_settings',
       'simpel_users_cache_v2',
     ],
     () => {
@@ -224,6 +247,17 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
     return filtered.length > 0 ? filtered : allClasses;
   }, [activeRole, teacherAssignments, allClasses]);
 
+  const teacherFilterOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const t of allTeachers) {
+      if (t.full_name) names.add(t.full_name);
+    }
+    for (const it of items) {
+      if (it.teacher_name) names.add(it.teacher_name);
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'id'));
+  }, [allTeachers, items]);
+
   const filteredItems = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
     return items.filter((item) => {
@@ -235,17 +269,25 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
         return false;
       }
       if (
+        (activeRole === 'kepala_madrasah' || activeRole === 'admin') &&
+        selectedTeacherFilter !== 'all' &&
+        (item.teacher_name || '') !== selectedTeacherFilter
+      ) {
+        return false;
+      }
+      if (
         q &&
         !(item.title || '').toLowerCase().includes(q) &&
         !(item.theme_or_dimension || '').toLowerCase().includes(q) &&
         !(item.description || '').toLowerCase().includes(q) &&
-        !(item.file_name || '').toLowerCase().includes(q)
+        !(item.file_name || '').toLowerCase().includes(q) &&
+        !(item.teacher_name || '').toLowerCase().includes(q)
       ) {
         return false;
       }
       return true;
     });
-  }, [items, activeSubMenu, selectedClassFilter, selectedSemesterFilter, searchTerm]);
+  }, [items, activeSubMenu, selectedClassFilter, selectedSemesterFilter, selectedTeacherFilter, activeRole, searchTerm]);
 
   const handleOpenAdd = () => {
     setEditingItem(null);
@@ -416,11 +458,13 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
         curriculumDocId = createdDoc.id;
       }
 
-      const savedItem = kokurikulerService.saveItem({
+      const savedItem = await kokurikulerService.saveItem({
         id: editingItem?.id,
         sub_menu: activeSubMenu,
-        teacher_id: teacherIdForRecord,
-        teacher_name: teacherNameForRecord,
+        teacher_id: editingItem?.teacher_id || teacherIdForRecord,
+        teacher_user_id: editingItem?.teacher_user_id || user?.id,
+        recorder_email: editingItem?.recorder_email || user?.email,
+        teacher_name: editingItem?.teacher_name || teacherNameForRecord,
         class_level: formClassLevel,
         class_name: classLabel,
         semester: formSemester,
@@ -504,6 +548,36 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
     fileStorageService.downloadStoredFile(stored);
   };
 
+  const handleReviewStatus = async (
+    item: KoKurikulerItem,
+    nextStatus: 'Disetujui' | 'Perlu Revisi'
+  ) => {
+    try {
+      const reviewedAt = new Date().toISOString();
+      await kokurikulerService.saveItem({
+        ...item,
+        status: nextStatus,
+        reviewed_at: reviewedAt,
+      });
+      if (item.curriculum_doc_id) {
+        await curriculumService
+          .reviewDocument(
+            item.curriculum_doc_id,
+            nextStatus,
+            nextStatus === 'Disetujui'
+              ? 'Program Ko Kurikuler disetujui Kepala Madrasah.'
+              : 'Mohon tinjau ulang dan lengkapi dokumen Ko Kurikuler.',
+            user?.id || 'usr-kamad'
+          )
+          .catch(() => {});
+      }
+      notify(`Status "${item.title}" diperbarui menjadi ${nextStatus}.`);
+      await loadData();
+    } catch (err) {
+      console.error('Gagal memperbarui status Ko Kurikuler:', err);
+    }
+  };
+
   const handleConfirmDelete = async () => {
     if (!pendingDelete) return;
     if (pendingDelete.file_id) {
@@ -512,7 +586,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
     if (pendingDelete.curriculum_doc_id) {
       await curriculumService.deleteDocument(pendingDelete.curriculum_doc_id).catch(() => {});
     }
-    kokurikulerService.deleteItem(pendingDelete.id);
+    await kokurikulerService.deleteItem(pendingDelete.id);
     notify(`"${pendingDelete.title}" berhasil dihapus.`);
     setPendingDelete(null);
     await loadData();
@@ -767,6 +841,24 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
                 <option value="Genap">Semester Genap</option>
               </select>
             </div>
+
+            {(activeRole === 'kepala_madrasah' || activeRole === 'admin') && (
+              <div className="flex items-center gap-1.5">
+                <span className="font-semibold text-slate-600">Guru:</span>
+                <select
+                  value={selectedTeacherFilter}
+                  onChange={(e) => setSelectedTeacherFilter(e.target.value)}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                >
+                  <option value="all">Semua Guru / Pembina</option>
+                  {teacherFilterOptions.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           <div className="relative w-full sm:w-64">
@@ -828,9 +920,16 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
                     </td>
                     <td className="px-4 py-3 space-y-1">
                       <div className="font-bold text-slate-900">{item.title}</div>
-                      <span className="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-semibold text-[10px]">
-                        {item.theme_or_dimension}
-                      </span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-semibold text-[10px]">
+                          {item.theme_or_dimension}
+                        </span>
+                        {item.teacher_name && (
+                          <span className="text-[10px] text-slate-500 font-medium">
+                            Pembina: {item.teacher_name}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 space-y-0.5">
                       <div className="font-semibold text-slate-800">{item.class_name}</div>
@@ -891,7 +990,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
                         ) : null}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className="px-4 py-3 text-center space-y-1">
                       <span
                         className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
                           item.status === 'Disetujui'
@@ -905,6 +1004,29 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
                       >
                         {item.status}
                       </span>
+                      {(activeRole === 'kepala_madrasah' || activeRole === 'admin') &&
+                        item.status !== 'Disetujui' && (
+                          <div className="flex items-center justify-center gap-1 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => void handleReviewStatus(item, 'Disetujui')}
+                              className="px-1.5 py-0.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-semibold cursor-pointer"
+                              title="Setujui Program"
+                            >
+                              Setujui
+                            </button>
+                            {item.status !== 'Perlu Revisi' && (
+                              <button
+                                type="button"
+                                onClick={() => void handleReviewStatus(item, 'Perlu Revisi')}
+                                className="px-1.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-[10px] font-semibold cursor-pointer"
+                                title="Minta Revisi"
+                              >
+                                Revisi
+                              </button>
+                            )}
+                          </div>
+                        )}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="inline-flex items-center justify-end gap-1">
@@ -1247,16 +1369,16 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
         title={previewModalState?.title}
         driveUploadError={previewModalState?.driveUploadError}
         onClose={() => setPreviewModalState(null)}
-        onFileUpdated={(updated) => {
+        onFileUpdated={async (updated) => {
           setPreviewModalState((prev) =>
             prev ? { ...prev, file: updated, driveUploadError: undefined } : null
           );
           if (updated.googleDriveUrl && previewModalState?.itemId) {
-            const existing = kokurikulerService
-              .getAll()
-              .find((x) => x.id === previewModalState.itemId);
+            const existing =
+              items.find((x) => x.id === previewModalState.itemId) ||
+              (await kokurikulerService.fetchAll()).find((x) => x.id === previewModalState.itemId);
             if (existing) {
-              kokurikulerService.saveItem({
+              await kokurikulerService.saveItem({
                 ...existing,
                 google_drive_url: updated.googleDriveUrl,
               });

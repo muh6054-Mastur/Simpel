@@ -23,6 +23,8 @@ import {
   Table as TableIcon,
   LayoutList,
   AlertCircle,
+  Edit3,
+  Trash2,
 } from 'lucide-react';
 
 interface TeachingJournalPageProps {
@@ -35,6 +37,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
     useWorkspace();
   const [journals, setJournals] = useState<TeachingJournal[]>([]);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+  const [teachersList, setTeachersList] = useState<Teacher[]>([]);
   const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [activeYearName, setActiveYearName] = useState<string>('2026/2027');
@@ -42,8 +45,11 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [showModal, setShowModal] = useState<boolean>(false);
+  const [editingJournal, setEditingJournal] = useState<TeachingJournal | null>(null);
+  const [pendingDeleteJournal, setPendingDeleteJournal] = useState<TeachingJournal | null>(null);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedAssignmentFilter, setSelectedAssignmentFilter] = useState<string>('all');
+  const [selectedTeacherFilter, setSelectedTeacherFilter] = useState<string>('all');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -76,6 +82,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
       ]);
 
       setResolvedTeacher(teacher);
+      setTeachersList(tchs);
       setSettings(sys);
 
       const actYear = years.find((y) => y.id === sys.active_academic_year_id || y.is_active) || years[0];
@@ -88,13 +95,18 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
           ? academicService.filterAssignmentsForUser(asgs, user, teacher, tchs)
           : asgs;
       const scopedIds = new Set(scopedAsgs.map((a) => a.id));
-      const { candidateTeacherIds } = academicService.getMatchingTeacherIdsForUser(user, teacher, tchs);
+      const { candidateTeacherIds, matchesTeacherRecord } = academicService.getMatchingTeacherIdsForUser(
+        user,
+        teacher,
+        tchs
+      );
       const scopedJournals =
         activeRole === 'guru'
           ? jrns.filter(
               (j) =>
                 scopedIds.has(j.assignment_id) ||
-                (j.assignment?.teacher_id ? candidateTeacherIds.has(j.assignment.teacher_id) : false)
+                (j.assignment?.teacher_id ? candidateTeacherIds.has(j.assignment.teacher_id) : false) ||
+                (j.assignment?.teacher ? matchesTeacherRecord(j.assignment.teacher) : false)
             )
           : jrns;
 
@@ -143,13 +155,40 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
   }, [loadData]);
 
   useRealtimeSync(
-    ['simpel_teaching_journals', 'simpel_assignments', 'simpel_teachers', 'simpel_users_cache_v2', 'simpel_classes', 'simpel_subjects'],
+    [
+      'simpel_teaching_journals',
+      'simpel_assignments',
+      'simpel_teachers',
+      'simpel_users_cache_v2',
+      'simpel_classes',
+      'simpel_subjects',
+      'simpel_academic_years',
+      'simpel_semesters',
+      'simpel_settings',
+    ],
     () => {
       void loadData();
     }
   );
 
-  const handleCreateJournal = async (e: React.FormEvent) => {
+  const handleOpenEditJournal = (j: TeachingJournal) => {
+    setFormError(null);
+    setEditingJournal(j);
+    setAssignmentId(j.assignment_id);
+    setDate(j.date);
+    setPeriodHours(j.period_hours || 'Jam ke-1 s.d. 3');
+    setTopic(j.topic);
+    setObjective(j.learning_objective);
+    setActivities(j.learning_activities);
+    setMethod(j.learning_method || 'Pembelajaran Mendalam (Deep Learning)');
+    setReflection(j.reflection || '');
+    setObstacles(j.obstacles || '');
+    setFollowUp(j.follow_up || '');
+    setNotes(j.notes || '');
+    setShowModal(true);
+  };
+
+  const handleSaveJournal = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     const effectiveAssignmentId = assignmentId || assignments[0]?.id || '';
@@ -160,29 +199,48 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
 
     setIsSubmitting(true);
     try {
-      const created = await journalService.createJournal({
-        assignment_id: effectiveAssignmentId,
-        date,
-        period_hours: periodHours.trim() || 'Jam ke-1 s.d. 2',
-        topic: topic.trim(),
-        learning_objective: objective.trim(),
-        learning_activities: activities.trim(),
-        learning_method: method.trim() || 'Pembelajaran Mendalam',
-        reflection: reflection.trim() || null,
-        obstacles: obstacles.trim() || null,
-        follow_up: followUp.trim() || null,
-        notes: notes.trim() || null,
-      });
+      if (editingJournal) {
+        const updated = await journalService.updateJournal(editingJournal.id, {
+          assignment_id: effectiveAssignmentId,
+          date,
+          period_hours: periodHours.trim() || 'Jam ke-1 s.d. 2',
+          topic: topic.trim(),
+          learning_objective: objective.trim(),
+          learning_activities: activities.trim(),
+          learning_method: method.trim() || 'Pembelajaran Mendalam',
+          reflection: reflection.trim() || null,
+          obstacles: obstacles.trim() || null,
+          follow_up: followUp.trim() || null,
+          notes: notes.trim() || null,
+        });
+        setJournals((prev) => prev.map((j) => (j.id === updated.id ? updated : j)));
+        setStatusMessage('Perubahan jurnal mengajar berhasil disimpan & disinkronkan.');
+      } else {
+        const created = await journalService.createJournal({
+          assignment_id: effectiveAssignmentId,
+          date,
+          period_hours: periodHours.trim() || 'Jam ke-1 s.d. 2',
+          topic: topic.trim(),
+          learning_objective: objective.trim(),
+          learning_activities: activities.trim(),
+          learning_method: method.trim() || 'Pembelajaran Mendalam',
+          reflection: reflection.trim() || null,
+          obstacles: obstacles.trim() || null,
+          follow_up: followUp.trim() || null,
+          notes: notes.trim() || null,
+        });
 
-      setJournals((prev) => [created, ...prev.filter((j) => j.id !== created.id)]);
-      if (selectedAssignmentFilter !== 'all' && selectedAssignmentFilter !== created.assignment_id) {
-        setSelectedAssignmentFilter(created.assignment_id);
-      }
-      if (searchTerm.trim()) {
-        setSearchTerm('');
+        setJournals((prev) => [created, ...prev.filter((j) => j.id !== created.id)]);
+        if (selectedAssignmentFilter !== 'all' && selectedAssignmentFilter !== created.assignment_id) {
+          setSelectedAssignmentFilter(created.assignment_id);
+        }
+        if (searchTerm.trim()) {
+          setSearchTerm('');
+        }
+        setStatusMessage('Jurnal mengajar harian berhasil disimpan dan langsung disinkronkan.');
       }
       setShowModal(false);
-      setStatusMessage('Jurnal mengajar harian berhasil disimpan dan langsung ditampilkan.');
+      setEditingJournal(null);
       await loadData();
       setTimeout(() => setStatusMessage(null), 4000);
     } catch (err: any) {
@@ -193,17 +251,35 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
     }
   };
 
+  const handleConfirmDeleteJournal = async () => {
+    if (!pendingDeleteJournal) return;
+    try {
+      await journalService.deleteJournal(pendingDeleteJournal.id);
+      setPendingDeleteJournal(null);
+      setStatusMessage('Jurnal mengajar berhasil dihapus.');
+      await loadData();
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (err) {
+      console.error('Gagal menghapus jurnal:', err);
+    }
+  };
+
   const filteredJournals = journals.filter((j) => {
     const matchesAssignment =
       selectedAssignmentFilter === 'all' || j.assignment_id === selectedAssignmentFilter;
+    const matchesTeacher =
+      activeRole === 'guru' ||
+      selectedTeacherFilter === 'all' ||
+      j.assignment?.teacher_id === selectedTeacherFilter;
     const q = searchTerm.toLowerCase();
     const matchesSearch =
       !q ||
       (j.topic || '').toLowerCase().includes(q) ||
       (j.learning_objective || '').toLowerCase().includes(q) ||
       (j.learning_activities || '').toLowerCase().includes(q) ||
+      (j.assignment?.teacher?.full_name || '').toLowerCase().includes(q) ||
       (j.date || '').includes(searchTerm);
-    return matchesAssignment && matchesSearch;
+    return matchesAssignment && matchesTeacher && matchesSearch;
   });
 
   // Ekspor ke format CSV / Excel
@@ -211,6 +287,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
     const headers = [
       'No',
       'Tanggal KBM',
+      'Guru Pengampu',
       'Kelas',
       'Mata Pelajaran',
       'Jam Pelajaran',
@@ -225,6 +302,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
     const rows = filteredJournals.map((j, idx) => [
       idx + 1,
       j.date,
+      `"${j.assignment?.teacher?.full_name || 'Guru Pengampu'}"`,
       `"${j.assignment?.class?.name || '-'}"`,
       `"${j.assignment?.subject?.name || 'Mata Pelajaran'}"`,
       `"${j.period_hours}"`,
@@ -256,7 +334,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
       <tr>
         <td class="center">${idx + 1}</td>
         <td class="center font-mono">${j.date}</td>
-        <td><strong>${j.assignment?.subject?.name || 'Mata Pelajaran'}</strong><br><small>${j.assignment?.class?.name || '-'}</small></td>
+        <td><strong>${j.assignment?.subject?.name || 'Mata Pelajaran'}</strong><br><small>${j.assignment?.class?.name || '-'}${j.assignment?.teacher?.full_name ? ` · ${j.assignment.teacher.full_name}` : ''}</small></td>
         <td>${j.topic}</td>
         <td>${j.learning_activities}</td>
         <td><span style="color:#047857;font-weight:bold;">${j.learning_method || '-'}</span></td>
@@ -352,6 +430,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
           <button
             onClick={() => {
               setFormError(null);
+              setEditingJournal(null);
               if (selectedAssignmentFilter !== 'all') {
                 setAssignmentId(selectedAssignmentFilter);
               } else if (!assignmentId && assignments[0]?.id) {
@@ -433,10 +512,29 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
               {assignments.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.class?.name || '-'} - {a.subject?.name || 'Mapel'}
+                  {activeRole !== 'guru' && a.teacher?.full_name ? ` (${a.teacher.full_name})` : ''}
                 </option>
               ))}
             </select>
           </div>
+
+          {activeRole !== 'guru' && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-slate-700">Guru:</span>
+              <select
+                value={selectedTeacherFilter}
+                onChange={(e) => setSelectedTeacherFilter(e.target.value)}
+                className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium"
+              >
+                <option value="all">Semua Dewan Guru</option>
+                {teachersList.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.full_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Toggle Mode Tampilan */}
           <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg border border-slate-200">
@@ -488,18 +586,19 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                   <th className="py-3 px-3.5">Tujuan & Aktivitas KBM</th>
                   <th className="py-3 px-3.5 w-44">Refleksi Berbasis Cinta</th>
                   <th className="py-3 px-3.5 w-36">Tindak Lanjut</th>
+                  <th className="py-3 px-3.5 w-20 text-right print:hidden">Aksi</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-slate-700">
                 {isLoading ? (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-400">
+                    <td colSpan={8} className="py-8 text-center text-slate-400">
                       Memuat jurnal mengajar...
                     </td>
                   </tr>
                 ) : filteredJournals.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-400">
+                    <td colSpan={8} className="py-8 text-center text-slate-400">
                       Tidak ada data jurnal mengajar yang sesuai filter.
                     </td>
                   </tr>
@@ -518,6 +617,11 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                         <div className="text-[11px] text-emerald-800 font-semibold mt-0.5">
                           {j.assignment?.class?.name || '-'}
                         </div>
+                        {j.assignment?.teacher?.full_name && (
+                          <div className="text-[10px] text-slate-500 mt-0.5">
+                            Guru: {j.assignment.teacher.full_name}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3.5 font-semibold text-slate-900 leading-snug">
                         {j.topic}
@@ -548,6 +652,26 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                           </div>
                         )}
                       </td>
+                      <td className="py-3 px-3.5 text-right print:hidden">
+                        <div className="inline-flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditJournal(j)}
+                            className="p-1 text-slate-400 hover:text-emerald-700 cursor-pointer"
+                            title="Edit Jurnal"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDeleteJournal(j)}
+                            className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer"
+                            title="Hapus Jurnal"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   ))
                 )}
@@ -570,20 +694,44 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">{j.topic}</h3>
-                    <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 mt-0.5">
                       <span className="font-semibold text-emerald-800">
                         {j.assignment?.subject?.name || 'Mata Pelajaran'}
                       </span>
                       <span aria-hidden="true">·</span>
                       <span>{j.assignment?.class?.name || '-'}</span>
+                      {j.assignment?.teacher?.full_name && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-medium text-slate-700">{j.assignment.teacher.full_name}</span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span className="font-mono tabular-nums">{j.date}</span>
                     </div>
                   </div>
                 </div>
-                <span className="text-[11px] font-mono tabular-nums text-slate-600 bg-slate-50 px-2.5 py-1 rounded border border-slate-200 self-start sm:self-auto font-medium">
-                  {j.period_hours}
-                </span>
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <span className="text-[11px] font-mono tabular-nums text-slate-600 bg-slate-50 px-2.5 py-1 rounded border border-slate-200 font-medium">
+                    {j.period_hours}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEditJournal(j)}
+                    className="p-1.5 text-slate-400 hover:text-emerald-700 print:hidden cursor-pointer"
+                    title="Edit Jurnal"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingDeleteJournal(j)}
+                    className="p-1.5 text-slate-400 hover:text-rose-600 print:hidden cursor-pointer"
+                    title="Hapus Jurnal"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -649,11 +797,13 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
         </div>
       </div>
 
-      {/* Modal Entri Jurnal Mengajar Baru */}
+      {/* Modal Entri / Edit Jurnal Mengajar */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 overflow-y-auto">
           <div className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-xl border border-slate-200 my-8">
-            <h3 className="text-base font-bold text-slate-900 mb-1">Entri Jurnal Mengajar Harian</h3>
+            <h3 className="text-base font-bold text-slate-900 mb-1">
+              {editingJournal ? 'Edit Jurnal Mengajar Harian' : 'Entri Jurnal Mengajar Harian'}
+            </h3>
             <p className="text-xs text-slate-500 mb-4">
               Isi data pelaksanaan pembelajaran langsung di aplikasi SIMPEL MI Al Ihsan.
             </p>
@@ -665,7 +815,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
               </div>
             )}
 
-            <form onSubmit={handleCreateJournal} className="space-y-4">
+            <form onSubmit={handleSaveJournal} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="sm:col-span-2">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Mata Pelajaran & Kelas</label>
@@ -796,9 +946,12 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
               </div>
 
               <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
-                <button
+                  <button
                   type="button"
-                  onClick={() => setShowModal(false)}
+                  onClick={() => {
+                    setShowModal(false);
+                    setEditingJournal(null);
+                  }}
                   disabled={isSubmitting}
                   className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg font-medium"
                 >
@@ -809,10 +962,41 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                   disabled={isSubmitting}
                   className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs disabled:opacity-50 cursor-pointer"
                 >
-                  {isSubmitting ? 'Menyimpan...' : 'Simpan Jurnal Mengajar'}
+                  {isSubmitting
+                    ? 'Menyimpan...'
+                    : editingJournal
+                    ? 'Simpan Perubahan'
+                    : 'Simpan Jurnal Mengajar'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteJournal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl max-w-sm w-full p-5 shadow-xl border border-slate-200 space-y-3">
+            <h3 className="text-sm font-bold text-slate-900">Hapus Jurnal Mengajar?</h3>
+            <p className="text-xs text-slate-600">
+              Jurnal <strong>{pendingDeleteJournal.topic}</strong> ({pendingDeleteJournal.date}) akan dihapus dari daftar.
+            </p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteJournal(null)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmDeleteJournal()}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 cursor-pointer"
+              >
+                Ya, Hapus
+              </button>
+            </div>
           </div>
         </div>
       )}

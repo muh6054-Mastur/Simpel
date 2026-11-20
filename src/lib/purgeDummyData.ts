@@ -33,6 +33,9 @@ export function runDataPurgeIfNecessary(): void {
           'simpel_grades',
           'simpel_class_officials',
           'simpel_teaching_journals',
+          'simpel_student_guidance',
+          'simpel_supervision_records',
+          'simpel_mi_kokurikuler_items_v1',
         ]) {
           const raw = localStorage.getItem(checkKey);
           if (raw) {
@@ -80,6 +83,7 @@ export function runDataPurgeIfNecessary(): void {
         'simpel_supervision_records',
         'simpel_curriculum_documents',
         'simpel_curriculum_reviews',
+        'simpel_mi_kokurikuler_items_v1',
         'simpel_homeroom_assignments',
         'simpel_activity_logs',
         'simpel_ai_drafts',

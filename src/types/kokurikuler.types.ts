@@ -8,6 +8,8 @@ export interface KoKurikulerItem {
   id: string;
   sub_menu: KoKurikulerSubMenu;
   teacher_id: string;
+  teacher_user_id?: string;
+  recorder_email?: string;
   teacher_name: string;
   class_level: number; // 0 = Lintas Kelas (Semua Rombel), 1..6 = Kelas tertentu
   class_name: string;
@@ -25,6 +27,8 @@ export interface KoKurikulerItem {
   folder_path?: string;
   curriculum_doc_id?: string;
   status: 'Draft' | 'Diajukan' | 'Disetujui' | 'Perlu Revisi';
+  review_notes?: string;
+  reviewed_at?: string;
   created_at: string;
   updated_at: string;
 }

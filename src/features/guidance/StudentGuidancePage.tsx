@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { guidanceService } from '../../services/guidanceService';
 import { academicService } from '../../services/academicService';
 import { StudentGuidanceRecord, Student, GuidanceStatus } from '../../types/database.types';
@@ -7,12 +7,12 @@ import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   HeartHandshake,
   Plus,
-  Shield,
   CheckCircle,
   AlertCircle,
-  Clock,
   Heart,
   Lock,
+  Trash2,
+  UserCheck,
 } from 'lucide-react';
 
 export const StudentGuidancePage: React.FC = () => {
@@ -22,6 +22,9 @@ export const StudentGuidancePage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [showModal, setShowModal] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Form State
   const [studentId, setStudentId] = useState<string>('');
@@ -34,37 +37,56 @@ export const StudentGuidancePage: React.FC = () => {
   const [recommendation, setRecommendation] = useState<string>('');
   const [guidanceStatus, setGuidanceStatus] = useState<GuidanceStatus>('Dalam_Proses');
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
       const [recs, stds] = await Promise.all([
-        guidanceService.getGuidanceRecords(activeRole, user?.id || 'usr-guru-1'),
+        guidanceService.getGuidanceRecords(activeRole, user?.id || '', user),
         academicService.getStudents(),
       ]);
       setRecords(recs);
       setStudents(stds);
-      if (stds.length > 0) setStudentId(stds[0].id);
+      if (stds.length > 0 && !studentId) setStudentId(stds[0].id);
     } catch (err) {
       console.error('Gagal memuat catatan bimbingan:', err);
+      setErrorMessage('Gagal memuat data bimbingan siswa.');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeRole, user?.id, user?.email, user?.teacherId, user?.homeroomClassId, user?.profile?.full_name]);
 
   useEffect(() => {
-    loadData();
-  }, [activeRole]);
-
-  useRealtimeSync(['simpel_student_guidance', 'simpel_students'], () => {
     void loadData();
-  });
+  }, [loadData]);
+
+  useRealtimeSync(
+    [
+      'simpel_student_guidance',
+      'simpel_students',
+      'simpel_teachers',
+      'simpel_classes',
+      'simpel_class_members',
+      'simpel_homeroom_assignments',
+      'simpel_users_cache_v2',
+    ],
+    () => {
+      void loadData();
+    }
+  );
 
   const handleCreateRecord = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage(null);
+    setIsSubmitting(true);
     try {
+      const resolvedTeacher = await academicService.resolveTeacherForUser(user);
       await guidanceService.createGuidanceRecord({
         student_id: studentId,
         recorded_by: user?.id || 'usr-guru-1',
+        recorder_user_id: user?.id || null,
+        teacher_id: resolvedTeacher?.id || user?.teacherId || null,
+        recorder_name: user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Madrasah',
+        recorder_email: user?.email || null,
         guidance_date: guidanceDate,
         guidance_type: guidanceType,
         problem_description: problemDesc,
@@ -73,20 +95,39 @@ export const StudentGuidancePage: React.FC = () => {
         status: guidanceStatus,
       });
       setShowModal(false);
-      setStatusMessage('Catatan bimbingan siswa berhasil disimpan secara rahasia.');
-      loadData();
-      setTimeout(() => setStatusMessage(null), 3000);
-    } catch (err) {
+      setStatusMessage('Catatan bimbingan siswa berhasil disimpan dan disinkronkan.');
+      await loadData();
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (err: any) {
       console.error('Gagal menyimpan bimbingan:', err);
+      setErrorMessage(err?.message || 'Gagal menyimpan catatan bimbingan siswa.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleUpdateStatus = async (id: string, newStatus: GuidanceStatus) => {
+    setErrorMessage(null);
     try {
       await guidanceService.updateGuidanceStatus(id, newStatus);
-      loadData();
-    } catch (err) {
+      await loadData();
+    } catch (err: any) {
       console.error('Gagal mengubah status bimbingan:', err);
+      setErrorMessage(err?.message || 'Gagal mengubah status bimbingan.');
+    }
+  };
+
+  const handleDeleteRecord = async (id: string) => {
+    setErrorMessage(null);
+    try {
+      await guidanceService.deleteGuidanceRecord(id);
+      setConfirmDeleteId(null);
+      setStatusMessage('Catatan bimbingan berhasil dihapus.');
+      await loadData();
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (err: any) {
+      console.error('Gagal menghapus catatan bimbingan:', err);
+      setErrorMessage(err?.message || 'Gagal menghapus catatan bimbingan.');
     }
   };
 
@@ -129,6 +170,13 @@ export const StudentGuidancePage: React.FC = () => {
         </div>
       )}
 
+      {errorMessage && (
+        <div className="flex items-center gap-2 p-3 text-xs font-medium text-rose-800 bg-rose-50 rounded-lg border border-rose-200">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
+
       {/* Daftar Catatan Bimbingan Terlindungi */}
       <div className="space-y-4">
         {isLoading ? (
@@ -150,17 +198,26 @@ export const StudentGuidancePage: React.FC = () => {
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">{r.student?.full_name || 'Santri'}</h3>
-                    <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 mt-0.5">
                       <span className="font-semibold text-emerald-800">Kategori: {r.guidance_type}</span>
                       <span aria-hidden="true">·</span>
                       <span className="font-mono tabular-nums">Tanggal: {r.guidance_date}</span>
                       <span aria-hidden="true">·</span>
-                      <span className="text-[11px] text-slate-400">NIS: {r.student?.nis}</span>
+                      <span className="text-[11px] text-slate-400">NIS: {r.student?.nis || '-'}</span>
+                      {(r.recorder_name || r.recorder?.full_name) && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-1 text-[11px] text-slate-600 font-medium">
+                            <UserCheck className="w-3 h-3 text-emerald-700" />
+                            <span>Pencatat: {r.recorder_name || r.recorder?.full_name}</span>
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs text-slate-500">Status:</span>
                   <select
                     value={r.status}
@@ -171,6 +228,33 @@ export const StudentGuidancePage: React.FC = () => {
                     <option value="Dalam_Proses">Dalam Proses</option>
                     <option value="Selesai">Selesai</option>
                   </select>
+                  {confirmDeleteId === r.id ? (
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteRecord(r.id)}
+                        className="px-2 py-1 rounded bg-rose-700 hover:bg-rose-800 text-white text-[11px] font-bold cursor-pointer"
+                      >
+                        Hapus?
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(r.id)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 rounded-md hover:bg-rose-50 cursor-pointer"
+                      title="Hapus catatan bimbingan"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -329,9 +413,10 @@ export const StudentGuidancePage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs disabled:opacity-50"
                 >
-                  Simpan Catatan BK
+                  {isSubmitting ? 'Menyimpan...' : 'Simpan Catatan BK'}
                 </button>
               </div>
             </form>
