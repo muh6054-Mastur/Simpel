@@ -169,6 +169,10 @@ interface SyncedFileRecord {
   dataUrl?: string;
   googleDriveUrl?: string;
   driveFileId?: string;
+  folderPath?: string;
+  folderUrl?: string;
+  uploadedViaAppsScript?: boolean;
+  driveUploadError?: string;
 }
 
 interface SyncFilesState {
@@ -2241,9 +2245,23 @@ async function callAppsScriptWebApp(webhookUrl: string, payload: Record<string, 
     );
   }
 
-  if (trimmed.startsWith('<') || trimmed.toLowerCase().includes('<!doctype html') || trimmed.toLowerCase().includes('accounts.google.com')) {
+  if (
+    upstreamRes.status === 401 ||
+    upstreamRes.status === 403 ||
+    trimmed.startsWith('<') ||
+    trimmed.toLowerCase().includes('<!doctype html') ||
+    trimmed.toLowerCase().includes('accounts.google.com') ||
+    trimmed.toLowerCase().includes('access denied')
+  ) {
+    const isForbidden =
+      upstreamRes.status === 401 ||
+      upstreamRes.status === 403 ||
+      trimmed.toLowerCase().includes('access denied') ||
+      trimmed.toLowerCase().includes('you need access');
     throw new Error(
-      'Web App Google Apps Script mengembalikan halaman HTML/login Google. Pastikan saat Deploy > New deployment di script.google.com, Execute as disetel ke "Me (alihsansoborejo@gmail.com)" dan Who has access disetel ke "Anyone" (Siapa saja).'
+      isForbidden
+        ? 'Google Apps Script menolak akses tanpa login (HTTP 403 / Access Denied). Jika sebelumnya di-deploy memakai akun belajar.id atau Google Workspace sekolah, domain Workspace umumnya memblokir akses publik ("Anyone"). Solusi: Deploy ulang skrip memakai akun @gmail.com biasa (mis. alihsansoborejo@gmail.com) dengan Execute as = "Me" dan Who has access = "Anyone" (Siapa saja).'
+        : 'Web App Google Apps Script mengembalikan halaman HTML/login Google. Pastikan saat Deploy > New deployment di script.google.com memakai akun @gmail.com biasa, Execute as disetel ke "Me" dan Who has access disetel ke "Anyone" (Siapa saja).'
     );
   }
 
@@ -2266,9 +2284,11 @@ async function callAppsScriptWebApp(webhookUrl: string, payload: Record<string, 
 app.get('/api/drive/config', (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   const cfg = loadServerDriveConfig();
+  const configured = isValidAppsScriptUrl(cfg.appsScriptWebhookUrl) && cfg.autoUploadToDrive !== false;
   res.json({
     success: true,
-    configured: isValidAppsScriptUrl(cfg.appsScriptWebhookUrl) && cfg.autoUploadToDrive !== false,
+    configured,
+    healthy: configured && cfg.lastTestStatus !== 'error',
     config: cfg,
   });
 });
@@ -2287,22 +2307,25 @@ app.post('/api/drive/config', (req: Request, res: Response) => {
     lastTestStatus: incoming.lastTestStatus,
     lastTestMessage: incoming.lastTestMessage,
   });
+  const configured = isValidAppsScriptUrl(saved.appsScriptWebhookUrl) && saved.autoUploadToDrive !== false;
   res.json({
     success: true,
-    configured: isValidAppsScriptUrl(saved.appsScriptWebhookUrl) && saved.autoUploadToDrive !== false,
+    configured,
+    healthy: configured && saved.lastTestStatus !== 'error',
     config: saved,
   });
 });
 
 app.post('/api/drive/apps-script-test', async (req: Request, res: Response) => {
+  const serverCfg = loadServerDriveConfig();
+  const {
+    webhookUrl: clientWebhookUrl = '',
+    folderName = serverCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo',
+    parentFolderId = '',
+  } = req.body || {};
+  const webhookUrl = String(clientWebhookUrl || serverCfg.appsScriptWebhookUrl || '').trim();
+
   try {
-    const serverCfg = loadServerDriveConfig();
-    const {
-      webhookUrl: clientWebhookUrl = '',
-      folderName = serverCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo',
-      parentFolderId = '',
-    } = req.body || {};
-    const webhookUrl = String(clientWebhookUrl || serverCfg.appsScriptWebhookUrl || '').trim();
     if (!webhookUrl || !isValidAppsScriptUrl(webhookUrl)) {
       res.status(400).json({
         success: false,
@@ -2342,9 +2365,19 @@ app.post('/api/drive/apps-script-test', async (req: Request, res: Response) => {
       ownerEmail: detectedOwner,
     });
   } catch (err: any) {
+    const errMsg = err?.message || 'Gagal menguji koneksi Google Apps Script.';
+    if (isValidAppsScriptUrl(webhookUrl)) {
+      saveServerDriveConfig({
+        appsScriptWebhookUrl: webhookUrl,
+        driveFolderName: String(folderName || serverCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo'),
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'error',
+        lastTestMessage: errMsg,
+      });
+    }
     res.status(400).json({
       success: false,
-      message: err?.message || 'Gagal menguji koneksi Google Apps Script.',
+      message: errMsg,
     });
   }
 });
@@ -2407,6 +2440,16 @@ app.post('/api/drive/apps-script-upload', async (req: Request, res: Response) =>
       uploadedBy: String(uploadedBy || ''),
     });
 
+    if (serverCfg.lastTestStatus !== 'connected') {
+      saveServerDriveConfig({
+        appsScriptWebhookUrl: webhookUrl,
+        ownerEmail: parsed?.ownerEmail || serverCfg.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'connected',
+        lastTestMessage: 'Upload otomatis ke Google Drive berhasil tanpa login.',
+      });
+    }
+
     res.json({
       success: true,
       id: parsed?.id || parsed?.fileId || '',
@@ -2418,10 +2461,19 @@ app.post('/api/drive/apps-script-upload', async (req: Request, res: Response) =>
       ownerEmail: parsed?.ownerEmail || serverCfg.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
     });
   } catch (err: any) {
-    console.error('[Apps Script Upload] Error:', err?.message || err);
+    const errMsg = err?.message || 'Gagal mengunggah berkas ke Google Drive via Apps Script.';
+    console.error('[Apps Script Upload] Error:', errMsg);
+    const serverCfg = loadServerDriveConfig();
+    if (isValidAppsScriptUrl(serverCfg.appsScriptWebhookUrl)) {
+      saveServerDriveConfig({
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'error',
+        lastTestMessage: errMsg,
+      });
+    }
     res.status(502).json({
       success: false,
-      message: err?.message || 'Gagal mengunggah berkas ke Google Drive via Apps Script.',
+      message: errMsg,
     });
   }
 });
