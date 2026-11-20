@@ -600,7 +600,7 @@ CREATE TABLE IF NOT EXISTS public.supervision_records (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     instrument_id UUID REFERENCES public.supervision_instruments(id) ON DELETE SET NULL,
     teacher_id UUID NOT NULL REFERENCES public.teachers(id) ON DELETE CASCADE,
-    supervisor_id UUID NOT NULL REFERENCES public.profiles(id),
+    supervisor_id UUID REFERENCES public.profiles(id),
     academic_year_id UUID NOT NULL REFERENCES public.academic_years(id) ON DELETE CASCADE,
     semester_id UUID NOT NULL REFERENCES public.semesters(id) ON DELETE CASCADE,
     class_id UUID REFERENCES public.classes(id) ON DELETE SET NULL,
@@ -639,6 +639,8 @@ CREATE TABLE IF NOT EXISTS public.supervision_records (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
 
+ALTER TABLE public.supervision_records ALTER COLUMN supervisor_id DROP NOT NULL;
+
 CREATE TABLE IF NOT EXISTS public.supervision_results (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     supervision_record_id UUID NOT NULL REFERENCES public.supervision_records(id) ON DELETE CASCADE,
@@ -666,13 +668,51 @@ CREATE TABLE IF NOT EXISTS public.supervision_followups (
 CREATE TABLE IF NOT EXISTS public.student_guidance_records (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
-    recorded_by UUID NOT NULL REFERENCES public.profiles(id),
+    recorded_by UUID REFERENCES public.profiles(id),
+    teacher_id UUID REFERENCES public.teachers(id) ON DELETE SET NULL,
+    recorder_name TEXT,
+    recorder_email TEXT,
     guidance_date DATE NOT NULL DEFAULT CURRENT_DATE,
     guidance_type TEXT NOT NULL,
     problem_description TEXT NOT NULL,
     counseling_summary TEXT NOT NULL,
     recommendation_followup TEXT NOT NULL,
     status guidance_status_type NOT NULL DEFAULT 'Dalam_Proses',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
+);
+
+ALTER TABLE public.student_guidance_records ALTER COLUMN recorded_by DROP NOT NULL;
+ALTER TABLE public.student_guidance_records ADD COLUMN IF NOT EXISTS teacher_id UUID REFERENCES public.teachers(id) ON DELETE SET NULL;
+ALTER TABLE public.student_guidance_records ADD COLUMN IF NOT EXISTS recorder_name TEXT;
+ALTER TABLE public.student_guidance_records ADD COLUMN IF NOT EXISTS recorder_email TEXT;
+
+-- KO KURIKULER
+CREATE TABLE IF NOT EXISTS public.kokurikuler_items (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sub_menu TEXT NOT NULL,
+    teacher_id TEXT,
+    teacher_user_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+    recorder_email TEXT,
+    teacher_name TEXT NOT NULL DEFAULT 'Guru Madrasah',
+    class_level INTEGER NOT NULL DEFAULT 0,
+    class_name TEXT NOT NULL DEFAULT 'Lintas Kelas (Semua Rombel)',
+    semester TEXT NOT NULL DEFAULT 'Ganjil',
+    academic_year TEXT NOT NULL DEFAULT '2026/2027',
+    theme_or_dimension TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    target_participants TEXT,
+    allocated_hours NUMERIC(6,2) DEFAULT 0,
+    activity_date TEXT,
+    file_id TEXT,
+    file_name TEXT,
+    google_drive_url TEXT,
+    folder_path TEXT,
+    curriculum_doc_id TEXT,
+    status TEXT NOT NULL DEFAULT 'Draft',
+    review_notes TEXT,
+    reviewed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
@@ -735,6 +775,8 @@ CREATE INDEX IF NOT EXISTS idx_supervision_year_sem ON public.supervision_record
 CREATE INDEX IF NOT EXISTS idx_supervision_type ON public.supervision_records(supervision_type);
 CREATE INDEX IF NOT EXISTS idx_supervision_results_record ON public.supervision_results(supervision_record_id);
 CREATE INDEX IF NOT EXISTS idx_supervision_followups_record ON public.supervision_followups(supervision_record_id);
+CREATE INDEX IF NOT EXISTS idx_kokurikuler_submenu_updated ON public.kokurikuler_items(sub_menu, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kokurikuler_teacher ON public.kokurikuler_items(teacher_id);
 
 -- ==========================================
 -- BAGIAN 4: FUNCTIONS & TRIGGERS
@@ -753,7 +795,7 @@ DECLARE
     tables text[] := ARRAY[
         'system_settings', 'profiles', 'teachers', 'students', 'class_officials', 'teaching_journals',
         'assessments', 'grades', 'final_grades', 'document_links', 'student_guidance_records',
-        'supervision_instruments', 'supervision_records', 'supervision_followups'
+        'kokurikuler_items', 'supervision_instruments', 'supervision_records', 'supervision_followups'
     ];
 BEGIN
     FOREACH tbl IN ARRAY tables LOOP
@@ -961,51 +1003,83 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
 
-CREATE OR REPLACE FUNCTION public.is_homeroom_of_class(target_class_id UUID)
+CREATE OR REPLACE FUNCTION public.is_matching_teacher(target_teacher_id UUID)
 RETURNS BOOLEAN AS $$
 DECLARE
-    tid UUID;
+    v_email TEXT;
+    v_teacher_id_text TEXT;
+BEGIN
+    IF target_teacher_id IS NULL OR auth.uid() IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.teachers t
+        WHERE t.id = target_teacher_id
+          AND t.user_id = auth.uid()
+    ) THEN
+        RETURN TRUE;
+    END IF;
+
+    v_email := LOWER(TRIM(COALESCE(auth.jwt() ->> 'email', '')));
+    IF v_email <> '' THEN
+        SELECT NULLIF(TRIM(teacher_id), '') INTO v_teacher_id_text
+        FROM public.app_user_credentials
+        WHERE email = v_email
+        LIMIT 1;
+
+        IF v_teacher_id_text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           AND v_teacher_id_text::UUID = target_teacher_id THEN
+            RETURN TRUE;
+        END IF;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.teachers t
+        JOIN public.profiles p ON p.id = auth.uid()
+        WHERE t.id = target_teacher_id
+          AND NULLIF(TRIM(p.full_name), '') IS NOT NULL
+          AND LOWER(TRIM(t.full_name)) = LOWER(TRIM(p.full_name))
+    ) THEN
+        RETURN TRUE;
+    END IF;
+
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.is_homeroom_of_class(target_class_id UUID)
+RETURNS BOOLEAN AS $$
 BEGIN
     IF public.is_admin() OR public.has_role('kepala_madrasah') THEN
         RETURN TRUE;
     END IF;
 
-    tid := public.get_current_teacher_id();
-    IF tid IS NULL THEN
-        RETURN FALSE;
-    END IF;
-
     RETURN EXISTS (
         SELECT 1 FROM public.homeroom_assignments ha
         JOIN public.academic_years ay ON ha.academic_year_id = ay.id
-        WHERE ha.teacher_id = tid
-          AND ha.class_id = target_class_id
+        WHERE ha.class_id = target_class_id
           AND ay.is_active = TRUE
+          AND public.is_matching_teacher(ha.teacher_id)
     );
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
 
 CREATE OR REPLACE FUNCTION public.is_teacher_of_assignment(target_assignment_id UUID)
 RETURNS BOOLEAN AS $$
-DECLARE
-    tid UUID;
 BEGIN
     IF public.is_admin() THEN
         RETURN TRUE;
     END IF;
 
-    tid := public.get_current_teacher_id();
-    IF tid IS NULL THEN
-        RETURN FALSE;
-    END IF;
-
     RETURN EXISTS (
-        SELECT 1 FROM public.teaching_assignments
-        WHERE id = target_assignment_id
-          AND teacher_id = tid
+        SELECT 1 FROM public.teaching_assignments ta
+        WHERE ta.id = target_assignment_id
+          AND public.is_matching_teacher(ta.teacher_id)
     );
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
 
 CREATE OR REPLACE FUNCTION public.is_student_taught_by_me(target_student_id UUID)
 RETURNS BOOLEAN AS $$
@@ -1132,7 +1206,7 @@ DECLARE
         'remedial_records', 'enrichment_records', 'final_grades', 'student_descriptions', 'report_cards',
         'document_links', 'document_link_versions', 'document_reviews', 'supervision_instruments',
         'supervision_aspects', 'supervision_indicators', 'supervision_records', 'supervision_results',
-        'supervision_followups', 'student_guidance_records', 'notifications', 'ai_generations', 'activity_logs'
+        'supervision_followups', 'student_guidance_records', 'kokurikuler_items', 'notifications', 'ai_generations', 'activity_logs'
     ];
 BEGIN
     FOREACH tbl IN ARRAY tables LOOP
@@ -1229,8 +1303,8 @@ CREATE POLICY "journals_select" ON public.teaching_journals
 DROP POLICY IF EXISTS "journals_write_own" ON public.teaching_journals;
 CREATE POLICY "journals_write_own" ON public.teaching_journals
     FOR ALL TO authenticated
-    USING (public.is_teacher_of_assignment(assignment_id) OR public.is_admin())
-    WITH CHECK (public.is_teacher_of_assignment(assignment_id) OR public.is_admin());
+    USING (public.is_teacher_of_assignment(assignment_id) OR public.is_principal())
+    WITH CHECK (public.is_teacher_of_assignment(assignment_id) OR public.is_principal());
 
 -- Attendance
 DROP POLICY IF EXISTS "attendance_select" ON public.student_attendance;
@@ -1426,7 +1500,7 @@ CREATE POLICY "supervision_records_select" ON public.supervision_records
     FOR SELECT TO authenticated
     USING (
         public.is_principal()
-        OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
+        OR (public.is_matching_teacher(teacher_id) AND is_shared_with_teacher = TRUE)
     );
 
 DROP POLICY IF EXISTS "supervision_records_insert" ON public.supervision_records;
@@ -1439,17 +1513,17 @@ CREATE POLICY "supervision_records_update" ON public.supervision_records
     FOR UPDATE TO authenticated
     USING (
         public.is_principal()
-        OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
+        OR (public.is_matching_teacher(teacher_id) AND is_shared_with_teacher = TRUE)
     )
     WITH CHECK (
         public.is_principal()
-        OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
+        OR (public.is_matching_teacher(teacher_id) AND is_shared_with_teacher = TRUE)
     );
 
 DROP POLICY IF EXISTS "supervision_records_delete" ON public.supervision_records;
 CREATE POLICY "supervision_records_delete" ON public.supervision_records
     FOR DELETE TO authenticated
-    USING (public.is_admin());
+    USING (public.is_principal());
 
 DROP POLICY IF EXISTS "supervision_results_select" ON public.supervision_results;
 CREATE POLICY "supervision_results_select" ON public.supervision_results
@@ -1459,7 +1533,7 @@ CREATE POLICY "supervision_results_select" ON public.supervision_results
         OR EXISTS (
             SELECT 1 FROM public.supervision_records sr
             WHERE sr.id = supervision_record_id
-              AND sr.teacher_id = public.get_current_teacher_id()
+              AND public.is_matching_teacher(sr.teacher_id)
               AND sr.is_shared_with_teacher = TRUE
         )
     );
@@ -1478,7 +1552,7 @@ CREATE POLICY "supervision_followups_select" ON public.supervision_followups
         OR EXISTS (
             SELECT 1 FROM public.supervision_records sr
             WHERE sr.id = supervision_record_id
-              AND sr.teacher_id = public.get_current_teacher_id()
+              AND public.is_matching_teacher(sr.teacher_id)
               AND sr.is_shared_with_teacher = TRUE
         )
     );
@@ -1491,7 +1565,8 @@ CREATE POLICY "supervision_followups_manage" ON public.supervision_followups
         OR EXISTS (
             SELECT 1 FROM public.supervision_records sr
             WHERE sr.id = supervision_record_id
-              AND sr.teacher_id = public.get_current_teacher_id()
+              AND public.is_matching_teacher(sr.teacher_id)
+              AND sr.is_shared_with_teacher = TRUE
         )
     )
     WITH CHECK (
@@ -1499,7 +1574,8 @@ CREATE POLICY "supervision_followups_manage" ON public.supervision_followups
         OR EXISTS (
             SELECT 1 FROM public.supervision_records sr
             WHERE sr.id = supervision_record_id
-              AND sr.teacher_id = public.get_current_teacher_id()
+              AND public.is_matching_teacher(sr.teacher_id)
+              AND sr.is_shared_with_teacher = TRUE
         )
     );
 
@@ -1507,18 +1583,147 @@ CREATE POLICY "supervision_followups_manage" ON public.supervision_followups
 DROP POLICY IF EXISTS "guidance_select_strict" ON public.student_guidance_records;
 CREATE POLICY "guidance_select_strict" ON public.student_guidance_records
     FOR SELECT TO authenticated
-    USING (recorded_by = auth.uid() OR public.is_principal());
+    USING (
+        recorded_by = auth.uid()
+        OR public.is_principal()
+        OR (teacher_id IS NOT NULL AND public.is_matching_teacher(teacher_id))
+        OR (
+            recorder_email IS NOT NULL
+            AND LOWER(TRIM(recorder_email)) = LOWER(TRIM(COALESCE(auth.jwt() ->> 'email', '')))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.class_members cm
+            WHERE cm.student_id = student_guidance_records.student_id
+              AND public.is_homeroom_of_class(cm.class_id)
+        )
+    );
 
 DROP POLICY IF EXISTS "guidance_insert_own" ON public.student_guidance_records;
 CREATE POLICY "guidance_insert_own" ON public.student_guidance_records
     FOR INSERT TO authenticated
-    WITH CHECK (recorded_by = auth.uid() OR public.is_admin());
+    WITH CHECK (recorded_by = auth.uid() OR recorded_by IS NULL OR public.is_principal());
 
 DROP POLICY IF EXISTS "guidance_update_own" ON public.student_guidance_records;
 CREATE POLICY "guidance_update_own" ON public.student_guidance_records
     FOR UPDATE TO authenticated
-    USING (recorded_by = auth.uid() OR public.is_admin())
-    WITH CHECK (recorded_by = auth.uid() OR public.is_admin());
+    USING (
+        recorded_by = auth.uid()
+        OR public.is_principal()
+        OR (teacher_id IS NOT NULL AND public.is_matching_teacher(teacher_id))
+        OR (
+            recorder_email IS NOT NULL
+            AND LOWER(TRIM(recorder_email)) = LOWER(TRIM(COALESCE(auth.jwt() ->> 'email', '')))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.class_members cm
+            WHERE cm.student_id = student_guidance_records.student_id
+              AND public.is_homeroom_of_class(cm.class_id)
+        )
+    )
+    WITH CHECK (
+        recorded_by = auth.uid()
+        OR public.is_principal()
+        OR (teacher_id IS NOT NULL AND public.is_matching_teacher(teacher_id))
+        OR (
+            recorder_email IS NOT NULL
+            AND LOWER(TRIM(recorder_email)) = LOWER(TRIM(COALESCE(auth.jwt() ->> 'email', '')))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.class_members cm
+            WHERE cm.student_id = student_guidance_records.student_id
+              AND public.is_homeroom_of_class(cm.class_id)
+        )
+    );
+
+DROP POLICY IF EXISTS "guidance_delete_own" ON public.student_guidance_records;
+CREATE POLICY "guidance_delete_own" ON public.student_guidance_records
+    FOR DELETE TO authenticated
+    USING (
+        recorded_by = auth.uid()
+        OR public.is_principal()
+        OR (teacher_id IS NOT NULL AND public.is_matching_teacher(teacher_id))
+        OR (
+            recorder_email IS NOT NULL
+            AND LOWER(TRIM(recorder_email)) = LOWER(TRIM(COALESCE(auth.jwt() ->> 'email', '')))
+        )
+    );
+
+-- Ko Kurikuler
+CREATE OR REPLACE FUNCTION public.is_kokurikuler_owner(
+    p_teacher_id TEXT,
+    p_teacher_user_id UUID,
+    p_recorder_email TEXT,
+    p_teacher_name TEXT
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_email TEXT;
+BEGIN
+    IF auth.uid() IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    IF p_teacher_user_id = auth.uid() THEN
+        RETURN TRUE;
+    END IF;
+    v_email := LOWER(TRIM(COALESCE(auth.jwt() ->> 'email', '')));
+    IF v_email <> '' AND p_recorder_email IS NOT NULL AND LOWER(TRIM(p_recorder_email)) = v_email THEN
+        RETURN TRUE;
+    END IF;
+    IF p_teacher_id IS NOT NULL THEN
+        IF p_teacher_id = auth.uid()::text THEN
+            RETURN TRUE;
+        END IF;
+        IF p_teacher_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           AND public.is_matching_teacher(p_teacher_id::UUID) THEN
+            RETURN TRUE;
+        END IF;
+    END IF;
+    IF p_teacher_name IS NOT NULL AND EXISTS (
+        SELECT 1 FROM public.profiles p
+        WHERE p.id = auth.uid()
+          AND NULLIF(TRIM(p.full_name), '') IS NOT NULL
+          AND LOWER(TRIM(p.full_name)) = LOWER(TRIM(p_teacher_name))
+    ) THEN
+        RETURN TRUE;
+    END IF;
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
+
+DROP POLICY IF EXISTS "kokurikuler_select" ON public.kokurikuler_items;
+CREATE POLICY "kokurikuler_select" ON public.kokurikuler_items
+    FOR SELECT TO authenticated
+    USING (
+        public.is_principal()
+        OR public.is_kokurikuler_owner(teacher_id, teacher_user_id, recorder_email, teacher_name)
+        OR (
+            public.has_role('wali_kelas')
+            AND (
+                class_level = 0
+                OR EXISTS (
+                    SELECT 1
+                    FROM public.homeroom_assignments ha
+                    JOIN public.classes c ON c.id = ha.class_id
+                    JOIN public.academic_years ay ON ay.id = ha.academic_year_id
+                    WHERE ay.is_active = TRUE
+                      AND public.is_matching_teacher(ha.teacher_id)
+                      AND c.level = class_level
+                )
+            )
+        )
+    );
+
+DROP POLICY IF EXISTS "kokurikuler_write" ON public.kokurikuler_items;
+CREATE POLICY "kokurikuler_write" ON public.kokurikuler_items
+    FOR ALL TO authenticated
+    USING (
+        public.is_principal()
+        OR public.is_kokurikuler_owner(teacher_id, teacher_user_id, recorder_email, teacher_name)
+    )
+    WITH CHECK (
+        public.is_principal()
+        OR public.is_kokurikuler_owner(teacher_id, teacher_user_id, recorder_email, teacher_name)
+    );
 
 -- Notifications & AI
 DROP POLICY IF EXISTS "notifications_own" ON public.notifications;
@@ -1685,7 +1890,7 @@ DECLARE
         'schedules', 'teaching_journals', 'student_attendance', 'assessments', 'grades',
         'remedial_records', 'enrichment_records', 'final_grades', 'report_cards',
         'document_links', 'document_reviews', 'supervision_records', 'supervision_results',
-        'supervision_followups', 'student_guidance_records', 'notifications', 'activity_logs'
+        'supervision_followups', 'student_guidance_records', 'kokurikuler_items', 'notifications', 'activity_logs'
     ];
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
@@ -1973,6 +2178,8 @@ GRANT EXECUTE ON FUNCTION public.has_role(public.user_role_type) TO authenticate
 GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_principal() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_current_teacher_id() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_matching_teacher(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_kokurikuler_owner(TEXT, UUID, TEXT, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_homeroom_of_class(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_teacher_of_assignment(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_student_taught_by_me(UUID) TO authenticated;
