@@ -34,6 +34,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
   const { user } = useAuth();
   const [data, setData] = useState<PrincipalDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [docTab, setDocTab] = useState<'Diajukan' | 'Disetujui' | 'Perlu Revisi' | 'all'>('Diajukan');
   const [reviewDoc, setReviewDoc] = useState<PrincipalDocumentSummary | null>(null);
   const [reviewDecision, setReviewDecision] = useState<'Disetujui' | 'Perlu Revisi'>('Disetujui');
@@ -44,10 +45,27 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
 
   const loadData = async () => {
     try {
+      setLoadError(null);
       const res = await fetchPrincipalDashboardData();
       setData(res);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error loading principal dashboard:', err);
+      setLoadError(err?.message || 'Gagal memuat ringkasan data Kepala Madrasah.');
+      setData((prev) =>
+        prev || {
+          totalTeachers: 0,
+          totalStudents: 0,
+          totalClasses: 0,
+          pendingDocumentsCount: 0,
+          approvedDocumentsCount: 0,
+          revisionDocumentsCount: 0,
+          totalSupervisions: 0,
+          totalJournalsToday: 0,
+          pendingDocuments: [],
+          submittedDocuments: [],
+          recentJournals: [],
+        }
+      );
     } finally {
       setIsLoading(false);
     }
@@ -144,6 +162,22 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
           <span>Formulir Supervisi KBM</span>
         </button>
       </div>
+
+      {loadError && (
+        <div className="flex items-center justify-between gap-2 p-3 text-xs font-medium text-amber-900 bg-amber-50 rounded-xl border border-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-600" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadData()}
+            className="px-2.5 py-1 rounded-md bg-white border border-amber-300 text-amber-900 font-semibold hover:bg-amber-100"
+          >
+            Muat Ulang
+          </button>
+        </div>
+      )}
 
       {toastMsg && (
         <div className="flex items-center justify-between gap-2 p-3 text-xs font-medium text-emerald-900 bg-emerald-50 rounded-xl border border-emerald-200">
@@ -289,11 +323,15 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
                     <p className="text-[11px] text-slate-500">
                       Guru: <span className="font-semibold text-slate-700">{doc.teacherName}</span> ·{' '}
                       {doc.className} · {doc.subjectName} ·{' '}
-                      {new Date(doc.submissionDate).toLocaleDateString('id-ID', {
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric',
-                      })}
+                      {(() => {
+                        const parsed = doc.submissionDate ? new Date(doc.submissionDate) : null;
+                        if (!parsed || Number.isNaN(parsed.getTime())) return '-';
+                        return parsed.toLocaleDateString('id-ID', {
+                          day: 'numeric',
+                          month: 'short',
+                          year: 'numeric',
+                        });
+                      })()}
                     </p>
                     {doc.reviewNotes && (
                       <p className="text-[11px] text-slate-600 italic bg-emerald-50/50 px-2.5 py-1 rounded border border-emerald-100">

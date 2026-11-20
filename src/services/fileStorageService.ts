@@ -470,7 +470,7 @@ export const fileStorageService = {
     };
   },
 
-  // Uji Koneksi Web App Google Apps Script melalui proxy server
+  // Uji Koneksi Web App Google Apps Script melalui proxy server (dengan fallback langsung dari browser bila route /api tidak tersedia seperti HTTP 405)
   async testAppsScriptConnection(
     configOverride?: Partial<DriveIntegrationConfig>
   ): Promise<{ success: boolean; message: string; folderUrl?: string; folderName?: string; ownerEmail?: string }> {
@@ -480,11 +480,15 @@ export const fileStorageService = {
       return { success: false, message: 'URL Web App Google Apps Script belum diisi.' };
     }
     const parentFolderId = extractFolderIdFromUrl(cfg.sharedFolderUrl || '');
+    const folderName = cfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo';
     const pingPayload = {
       webhookUrl,
-      folderName: cfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo',
+      folderName,
       parentFolderId: parentFolderId || '',
     };
+
+    let proxyFailureMessage = '';
+    let shouldFallbackDirect = false;
 
     try {
       const res = await fetch('/api/drive/apps-script-test', {
@@ -493,31 +497,62 @@ export const fileStorageService = {
         body: JSON.stringify(pingPayload),
       });
       const { data: json, rawText, isEmptyOrNonJson } = await readJsonResponseSafely(res);
-      if (isEmptyOrNonJson) {
+
+      if (res.ok && json?.success) {
         return {
-          success: false,
-          message: buildHttpFallbackMessage(res.status, rawText, 'Gagal menguji koneksi Google Apps Script'),
+          success: true,
+          message: json.message || 'Koneksi Google Apps Script berhasil.',
+          folderUrl: json.folderUrl,
+          folderName: json.folderName,
+          ownerEmail: json.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
         };
       }
-      if (!res.ok || !json?.success) {
+
+      if (!isEmptyOrNonJson && json?.message && ![404, 405, 502, 503, 504].includes(res.status)) {
         return {
           success: false,
-          message: json?.message || 'Gagal menghubungi Google Apps Script.',
+          message: json.message,
         };
       }
-      return {
-        success: true,
-        message: json.message || 'Koneksi Google Apps Script berhasil.',
-        folderUrl: json.folderUrl,
-        folderName: json.folderName,
-        ownerEmail: json.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
-      };
+
+      shouldFallbackDirect = true;
+      proxyFailureMessage =
+        json?.message ||
+        buildHttpFallbackMessage(res.status, rawText, 'Gagal menguji koneksi Google Apps Script');
     } catch (err: any) {
-      return {
-        success: false,
-        message: err?.message || 'Gagal menghubungi server untuk uji koneksi Google Apps Script.',
-      };
+      shouldFallbackDirect = true;
+      proxyFailureMessage =
+        err?.message || 'Gagal menghubungi server untuk uji koneksi Google Apps Script.';
     }
+
+    if (shouldFallbackDirect) {
+      try {
+        const directRes = await postDirectlyToAppsScript(webhookUrl, {
+          action: 'ping',
+          folderName,
+          parentFolderId: parentFolderId || '',
+        });
+        return {
+          success: true,
+          message:
+            directRes?.message ||
+            `Koneksi Google Apps Script aktif (${directRes?.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL})! Folder "${directRes?.folderName || folderName}" siap menerima arsip dokumen tanpa login.`,
+          folderUrl: directRes?.folderUrl || '',
+          folderName: directRes?.folderName || folderName,
+          ownerEmail: directRes?.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
+        };
+      } catch (directErr: any) {
+        return {
+          success: false,
+          message: directErr?.message || proxyFailureMessage || 'Gagal menghubungi Google Apps Script.',
+        };
+      }
+    }
+
+    return {
+      success: false,
+      message: proxyFailureMessage || 'Gagal menghubungi Google Apps Script.',
+    };
   },
 
   /**
@@ -1005,8 +1040,12 @@ export const fileStorageService = {
           };
         }
 
-        // Jika proxy mengembalikan error JSON terstruktur selain error proxy (413/504/empty), lempar langsung
-        if (!isEmptyOrNonJson && result?.message && response.status !== 413 && response.status !== 504) {
+        // Jika proxy mengembalikan error JSON terstruktur selain error proxy (404/405/413/5xx/empty), lempar langsung
+        if (
+          !isEmptyOrNonJson &&
+          result?.message &&
+          ![404, 405, 413, 502, 503, 504].includes(response.status)
+        ) {
           throw new Error(result.message);
         }
 

@@ -9,6 +9,24 @@ import { Profile, UserRole, ActivityLog, Teacher } from '../types/database.types
 import { DEMO_USERS, DEMO_TEACHERS } from '../lib/demoData';
 import { academicService, cleanTeacherIdentifier, getTeacherDisplayName, normalizePersonName, stripPersonTitles } from './academicService';
 import { activityLogService } from './activityLogService';
+import { syncService } from './syncService';
+
+const ROLE_PRIORITY: UserRole[] = ['admin', 'kepala_madrasah', 'wali_kelas', 'guru'];
+
+export function sortRolesByPriority(roles: UserRole[] | null | undefined): UserRole[] {
+  const validSet = new Set<UserRole>();
+  if (Array.isArray(roles)) {
+    for (const r of roles) {
+      if (ROLE_PRIORITY.includes(r)) {
+        validSet.add(r);
+      }
+    }
+  }
+  if (validSet.size === 0) {
+    return ['guru'];
+  }
+  return ROLE_PRIORITY.filter((r) => validSet.has(r));
+}
 
 export interface UserListItem {
   id: string;
@@ -165,7 +183,13 @@ export async function fetchUsersList(filters?: {
             avatar_url: row.avatar_url ?? existingLocal?.avatar_url ?? null,
             is_active: row.is_active ?? existingLocal?.is_active ?? true,
             created_at: row.created_at || existingLocal?.created_at || new Date().toISOString(),
-            roles: remoteRoles.length > 0 ? remoteRoles : existingLocal?.roles || ['guru'],
+            roles: sortRolesByPriority(
+              existingLocal?.roles && existingLocal.roles.length > 0
+                ? existingLocal.roles
+                : remoteRoles.length > 0
+                  ? remoteRoles
+                  : ['guru']
+            ),
             password: existingLocal?.password || undefined,
             title_prefix: teacher?.title_prefix ?? existingLocal?.title_prefix ?? null,
             title_suffix: teacher?.title_suffix ?? existingLocal?.title_suffix ?? null,
@@ -344,7 +368,7 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
     avatar_url: null,
     is_active: true,
     created_at: new Date().toISOString(),
-    roles: data.roles,
+    roles: sortRolesByPriority(data.roles),
     password,
     title_prefix: data.title_prefix || linkedTeacher?.title_prefix || null,
     title_suffix: data.title_suffix || linkedTeacher?.title_suffix || null,
@@ -363,6 +387,7 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
 
   const updated = [newItem, ...currentUsers];
   saveDemoUsers(updated);
+  void syncService.flushMutations();
 
   // Daftarkan otomatis ke Supabase Auth via client terpisah agar sesi Admin tidak tertimpa
   if (isSupabaseAvailable()) {
@@ -623,7 +648,7 @@ export async function updateUserAndTeacher(
     email: normalizedTargetEmail,
     phone_number: cleanPhone,
     password: resolvedPassword,
-    roles: payload.roles,
+    roles: sortRolesByPriority(payload.roles),
     is_active: payload.is_active,
     title_prefix: payload.title_prefix || null,
     title_suffix: payload.title_suffix || null,
@@ -639,6 +664,7 @@ export async function updateUserAndTeacher(
     ? latestUsers.map((u) => (u.id === existing.id ? updatedUser : u))
     : [updatedUser, ...latestUsers];
   saveDemoUsers(updatedList);
+  void syncService.flushMutations();
 
   return updatedUser;
 }

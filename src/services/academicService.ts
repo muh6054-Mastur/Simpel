@@ -32,6 +32,7 @@ import {
   DEMO_HOMEROOM_ASSIGNMENTS,
   DEMO_CLASS_OFFICIALS,
 } from '../lib/demoData';
+import { syncService } from './syncService';
 
 const STORAGE_KEYS = {
   ACADEMIC_YEARS: 'simpel_academic_years',
@@ -63,6 +64,12 @@ function setLocal<T>(key: string, value: T): void {
     console.error(`Failed to store ${key}:`, err);
   } finally {
     invalidateAcademicCache();
+  }
+}
+
+function emitAcademicSyncEvent(keys: string[]): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys } }));
   }
 }
 
@@ -1269,6 +1276,8 @@ export const academicService = {
 
     const officials = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
     setLocal(STORAGE_KEYS.CLASS_OFFICIALS, officials.filter((o) => o.student_id !== id));
+    emitAcademicSyncEvent([STORAGE_KEYS.STUDENTS, STORAGE_KEYS.CLASS_MEMBERS, STORAGE_KEYS.CLASS_OFFICIALS]);
+    void syncService.flushMutations();
   },
 
   // === DATA GURU ===
@@ -2757,11 +2766,22 @@ export const academicService = {
     // Jika siswa pindah dari kelas lain, bersihkan jabatan perangkat kelas di kelas lama
     if (existingMember && existingMember.class_id !== targetClass.id) {
       const officials = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
-      const cleanedOfficials = officials.filter(
-        (o) => !(o.student_id === studentId && o.class_id === existingMember.class_id)
+      const removedFromOld = officials.filter(
+        (o) => o.student_id === studentId && o.class_id === existingMember.class_id
       );
-      if (cleanedOfficials.length !== officials.length) {
+      if (removedFromOld.length > 0) {
+        const cleanedOfficials = officials.filter(
+          (o) => !(o.student_id === studentId && o.class_id === existingMember.class_id)
+        );
         setLocal(STORAGE_KEYS.CLASS_OFFICIALS, cleanedOfficials);
+        emitAcademicSyncEvent([STORAGE_KEYS.CLASS_OFFICIALS]);
+        if (isSupabaseAvailable() && isUuid(studentId) && isUuid(existingMember.class_id)) {
+          void supabase
+            .from('class_officials')
+            .delete()
+            .eq('student_id', studentId)
+            .eq('class_id', existingMember.class_id);
+        }
       }
     }
 
@@ -2783,6 +2803,14 @@ export const academicService = {
     );
     if (cleanedOfficials.length !== officials.length) {
       setLocal(STORAGE_KEYS.CLASS_OFFICIALS, cleanedOfficials);
+      emitAcademicSyncEvent([STORAGE_KEYS.CLASS_OFFICIALS]);
+      if (isSupabaseAvailable() && isUuid(studentId)) {
+        let offQuery = supabase.from('class_officials').delete().eq('student_id', studentId);
+        if (classId && isUuid(classId)) {
+          offQuery = offQuery.eq('class_id', classId);
+        }
+        void offQuery;
+      }
     }
 
     if (isSupabaseAvailable() && isUuid(studentId)) {
@@ -2832,10 +2860,62 @@ export const academicService = {
 
   // === PERANGKAT KELAS (STRUKTUR ORGANISASI ROMBEL) ===
   async getClassOfficials(classId?: string): Promise<ClassOfficial[]> {
-    const rawList = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
+    let rawList = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
+
+    if (isSupabaseAvailable()) {
+      try {
+        const { data, error } = await supabase
+          .from('class_officials')
+          .select('*, student:students(*), class:classes(*)')
+          .order('order_index', { ascending: true });
+
+        if (!error) {
+          reportSupabaseOutcome(null);
+          if (Array.isArray(data) && data.length > 0) {
+            const mergedMap = new Map<string, ClassOfficial>();
+            let changedFromRemote = false;
+
+            for (const lo of rawList) {
+              mergedMap.set(lo.id, lo);
+            }
+            for (const ro of data as ClassOfficial[]) {
+              const existing = mergedMap.get(ro.id);
+              if (!existing) {
+                mergedMap.set(ro.id, ro);
+                changedFromRemote = true;
+              } else {
+                const remoteMs = Date.parse(ro.updated_at || ro.created_at || '') || 0;
+                const localMs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
+                if (remoteMs > localMs) {
+                  mergedMap.set(ro.id, ro);
+                  changedFromRemote = true;
+                }
+              }
+            }
+            rawList = Array.from(mergedMap.values());
+            if (changedFromRemote) {
+              syncService.setLocalCacheSilently(
+                STORAGE_KEYS.CLASS_OFFICIALS,
+                JSON.stringify(rawList.map(({ student: _s, class: _c, ...rest }) => rest))
+              );
+            }
+          }
+        } else {
+          const errCode = String(error.code || '');
+          const errMsg = String(error.message || '').toLowerCase();
+          // Abaikan diam-diam jika tabel class_officials belum dijalankan di SQL Editor Supabase
+          if (errCode !== '42P01' && errCode !== 'PGRST205' && !errMsg.includes('class_officials')) {
+            reportSupabaseOutcome(error);
+          }
+        }
+      } catch (err) {
+        console.warn('Supabase getClassOfficials fallback:', err);
+      }
+    }
+
     const [students, classes] = await Promise.all([
       this.getStudents(),
-      getLocal<ClassRoom[]>(STORAGE_KEYS.CLASSES, DEMO_CLASSES),
+      this.getClasses(),
     ]);
 
     const studentMap = new Map(students.map((s) => [s.id, s]));
@@ -2894,8 +2974,11 @@ export const academicService = {
             trimmedRole.toLowerCase() !== 'anggota'
         );
 
+    const existingId = existingIndex >= 0 ? current[existingIndex].id : payload.id;
+    const resolvedId = existingId && isUuid(existingId) ? existingId : generateUuid();
+
     const record: ClassOfficial = {
-      id: existingIndex >= 0 ? current[existingIndex].id : payload.id || `co-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: resolvedId,
       class_id: payload.class_id,
       student_id: payload.student_id,
       academic_year_id: payload.academic_year_id || ctx.academicYearId,
@@ -2908,20 +2991,84 @@ export const academicService = {
       class: classes.find((c) => c.id === payload.class_id),
     };
 
+    if (
+      isSupabaseAvailable() &&
+      isUuid(record.id) &&
+      isUuid(record.class_id) &&
+      isUuid(record.student_id)
+    ) {
+      try {
+        const dbPayload = {
+          id: record.id,
+          class_id: record.class_id,
+          student_id: record.student_id,
+          academic_year_id: isUuid(record.academic_year_id) ? record.academic_year_id : null,
+          role_name: record.role_name,
+          order_index: record.order_index,
+          notes: record.notes ?? null,
+          created_at: record.created_at,
+          updated_at: record.updated_at,
+        };
+        const { error } = await supabase
+          .from('class_officials')
+          .upsert(dbPayload, { onConflict: 'id' });
+        if (error) {
+          const errCode = String(error.code || '');
+          if (errCode !== '42P01' && errCode !== 'PGRST205') {
+            reportSupabaseOutcome(error);
+          }
+          console.warn('Supabase upsertClassOfficial warning:', error.message);
+        } else {
+          reportSupabaseOutcome(null);
+        }
+      } catch (err) {
+        console.warn('Supabase upsertClassOfficial fallback:', err);
+      }
+    }
+
+    const storageRecord = {
+      id: record.id,
+      class_id: record.class_id,
+      student_id: record.student_id,
+      academic_year_id: record.academic_year_id,
+      role_name: record.role_name,
+      order_index: record.order_index,
+      notes: record.notes ?? null,
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+    };
+
     const nextList =
       existingIndex >= 0
-        ? current.map((o, idx) => (idx === existingIndex ? record : o))
-        : [...current, record];
+        ? current.map((o, idx) => (idx === existingIndex ? storageRecord : o))
+        : [...current, storageRecord];
 
     setLocal(STORAGE_KEYS.CLASS_OFFICIALS, nextList);
+    emitAcademicSyncEvent([STORAGE_KEYS.CLASS_OFFICIALS]);
+    void syncService.flushMutations();
     return record;
   },
 
   async deleteClassOfficial(id: string): Promise<void> {
+    if (isSupabaseAvailable() && isUuid(id)) {
+      try {
+        const { error } = await supabase.from('class_officials').delete().eq('id', id);
+        if (error) {
+          const errCode = String(error.code || '');
+          if (errCode !== '42P01' && errCode !== 'PGRST205') {
+            reportSupabaseOutcome(error);
+          }
+        }
+      } catch (err) {
+        console.warn('Supabase deleteClassOfficial fallback:', err);
+      }
+    }
     const current = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
     setLocal(
       STORAGE_KEYS.CLASS_OFFICIALS,
       current.filter((o) => o.id !== id)
     );
+    emitAcademicSyncEvent([STORAGE_KEYS.CLASS_OFFICIALS]);
+    void syncService.flushMutations();
   },
 };

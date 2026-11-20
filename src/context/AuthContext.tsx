@@ -9,7 +9,7 @@ import {
   fetchFullUserAccount,
 } from '../services/authService';
 import { supabase, isSupabaseConfigured, isSupabaseAvailable, reportSupabaseOutcome } from '../lib/supabaseClient';
-import { getDemoUsers } from '../services/userService';
+import { getDemoUsers, sortRolesByPriority } from '../services/userService';
 import { academicService } from '../services/academicService';
 import { useRealtimeSync } from '../hooks/useRealtimeSync';
 
@@ -42,6 +42,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     let mounted = true;
 
+    const reconcileLocalSession = (local: AuthUser): AuthUser => {
+      const latestUsers = getDemoUsers();
+      const matched = latestUsers.find(
+        (u) => u.id === local.id || u.email.toLowerCase() === local.email.toLowerCase()
+      );
+      const nextRoles = sortRolesByPriority(
+        matched && matched.roles.length > 0 ? matched.roles : local.roles
+      );
+      const newlyGrantedPrincipal =
+        !local.roles.includes('kepala_madrasah') && nextRoles.includes('kepala_madrasah');
+      const nextActiveRole: UserRole = newlyGrantedPrincipal
+        ? 'kepala_madrasah'
+        : nextRoles.includes(local.activeRole)
+          ? local.activeRole
+          : nextRoles[0];
+      const nextUser: AuthUser = {
+        ...local,
+        roles: nextRoles,
+        activeRole: nextActiveRole,
+        profile: matched
+          ? {
+              ...local.profile,
+              full_name: matched.full_name || local.profile.full_name,
+              phone_number: matched.phone_number ?? local.profile.phone_number,
+              avatar_url: matched.avatar_url ?? local.profile.avatar_url,
+              is_active: matched.is_active ?? local.profile.is_active,
+            }
+          : local.profile,
+      };
+      if (JSON.stringify(nextUser) !== JSON.stringify(local)) {
+        localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
+      }
+      return nextUser;
+    };
+
     async function initSession() {
       try {
         if (isSupabaseAvailable()) {
@@ -57,8 +92,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               reportSupabaseOutcome(supaErr);
               const local = getPersistedSession();
               if (local && mounted) {
-                setUser(local);
-                setActiveRole(local.activeRole);
+                const syncedLocal = reconcileLocalSession(local);
+                setUser(syncedLocal);
+                setActiveRole(syncedLocal.activeRole);
               } else {
                 throw supaErr;
               }
@@ -66,16 +102,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } else {
             const local = getPersistedSession();
             if (local && mounted) {
-              setUser(local);
-              setActiveRole(local.activeRole);
+              const syncedLocal = reconcileLocalSession(local);
+              setUser(syncedLocal);
+              setActiveRole(syncedLocal.activeRole);
             }
           }
         } else {
           // Mode demo / Server Lokal / offline fallback
           const local = getPersistedSession();
           if (local && mounted) {
-            setUser(local);
-            setActiveRole(local.activeRole);
+            const syncedLocal = reconcileLocalSession(local);
+            setUser(syncedLocal);
+            setActiveRole(syncedLocal.activeRole);
           }
         }
       } catch (err: any) {
@@ -192,8 +230,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (!sessErr && session?.user?.id && session.user.id === user.id) {
             const refreshed = await fetchFullUserAccount(user.id, user.email);
             reportSupabaseOutcome();
-            if (JSON.stringify(refreshed) !== JSON.stringify(user)) {
-              setUser(refreshed);
+            const newlyGrantedPrincipal =
+              !user.roles.includes('kepala_madrasah') && refreshed.roles.includes('kepala_madrasah');
+            const nextActiveRole: UserRole = newlyGrantedPrincipal
+              ? 'kepala_madrasah'
+              : refreshed.roles.includes(activeRole)
+                ? activeRole
+                : refreshed.activeRole;
+            const nextUser: AuthUser = {
+              ...refreshed,
+              activeRole: nextActiveRole,
+            };
+            if (nextActiveRole !== activeRole) {
+              setActiveRole(nextActiveRole);
+            }
+            if (JSON.stringify(nextUser) !== JSON.stringify(user)) {
+              setUser(nextUser);
+              localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
             }
             return;
           }
@@ -228,8 +281,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
       const homeroomClassId = hrClass?.id || null;
 
-      const nextRoles = matched && matched.roles.length > 0 ? matched.roles : user.roles;
-      const nextActiveRole = nextRoles.includes(activeRole) ? activeRole : nextRoles[0];
+      const nextRoles = sortRolesByPriority(
+        matched && matched.roles.length > 0 ? matched.roles : user.roles
+      );
+      const newlyGrantedPrincipal =
+        !user.roles.includes('kepala_madrasah') && nextRoles.includes('kepala_madrasah');
+      const nextActiveRole: UserRole = newlyGrantedPrincipal
+        ? 'kepala_madrasah'
+        : nextRoles.includes(activeRole)
+          ? activeRole
+          : nextRoles[0];
 
       const updated: AuthUser = {
         ...user,
@@ -265,7 +326,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   );
 
-  const availableRoles = useMemo(() => user?.roles || [], [user]);
+  const availableRoles = useMemo(
+    () => (user?.roles ? sortRolesByPriority(user.roles) : []),
+    [user]
+  );
 
   const hasRole = (role: UserRole): boolean => {
     if (!user) return false;

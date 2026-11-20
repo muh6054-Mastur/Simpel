@@ -14,6 +14,7 @@ import {
 import { academicService } from './academicService';
 import { curriculumWorkspaceService } from './curriculumWorkspaceService';
 import { reportService } from './reportService';
+import { syncService } from './syncService';
 
 const STORAGE_KEYS = {
   ASSESSMENTS: 'simpel_assessments',
@@ -149,6 +150,7 @@ export const assessmentService = {
         reportSupabaseOutcome(error);
         if (!error && Array.isArray(data) && data.length > 0) {
           const mergedMap = new Map<string, Assessment>();
+          let changedFromRemote = false;
           for (const localItem of baseItems) {
             mergedMap.set(localItem.id, localItem);
           }
@@ -159,18 +161,23 @@ export const assessmentService = {
                 ...item,
                 scope_key: item.scope_key ?? null,
               });
+              changedFromRemote = true;
             } else {
-              const remoteMs = getTimeMs((item as any).updated_at || item.created_at);
-              const localMs = getTimeMs((localMeta as any).updated_at || localMeta.created_at);
+              const remoteMs = getTimeMs(item.updated_at || item.created_at);
+              const localMs = getTimeMs(localMeta.updated_at || localMeta.created_at);
               if (remoteMs > localMs) {
                 mergedMap.set(item.id, {
                   ...item,
                   scope_key: item.scope_key ?? localMeta.scope_key ?? null,
                 });
+                changedFromRemote = true;
               }
             }
           }
           baseItems = Array.from(mergedMap.values());
+          if (changedFromRemote) {
+            syncService.setLocalCacheSilently(STORAGE_KEYS.ASSESSMENTS, JSON.stringify(baseItems));
+          }
         }
       } catch (err) {
         reportSupabaseOutcome(err);
@@ -192,20 +199,27 @@ export const assessmentService = {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `asm-${Date.now()}`;
     const assignments = await academicService.getTeachingAssignments();
     const matchedAssignment = assignments.find((a) => a.id === payload.assignment_id);
+    const now = new Date().toISOString();
 
     let newAsm: Assessment = {
       ...payload,
       id,
       assignment: matchedAssignment,
-      created_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     };
 
     if (isSupabaseAvailable() && isUuid(id) && isUuid(payload.assignment_id)) {
       try {
         const { assignment: _a, ...dbAsm } = newAsm;
         let { data, error } = await supabase.from('assessments').insert(dbAsm).select().single();
-        if (error && (error.code === 'PGRST204' || String(error.message || '').includes('scope_key'))) {
-          const { scope_key: _sk, ...legacyDbAsm } = dbAsm;
+        if (
+          error &&
+          (error.code === 'PGRST204' ||
+            String(error.message || '').includes('scope_key') ||
+            String(error.message || '').includes('updated_at'))
+        ) {
+          const { scope_key: _sk, updated_at: _ua, ...legacyDbAsm } = dbAsm;
           ({ data, error } = await supabase.from('assessments').insert(legacyDbAsm).select().single());
         }
         reportSupabaseOutcome(error);
@@ -213,6 +227,7 @@ export const assessmentService = {
           newAsm = {
             ...(data as Assessment),
             scope_key: (data as Assessment).scope_key ?? payload.scope_key ?? null,
+            updated_at: (data as Assessment).updated_at ?? now,
             assignment: matchedAssignment,
           };
         }
@@ -240,17 +255,21 @@ export const assessmentService = {
     const assignments = await academicService.getTeachingAssignments();
     const nextAssignmentId = patch.assignment_id || existing.assignment_id;
     const matchedAssignment = assignments.find((a) => a.id === nextAssignmentId);
+    const now = new Date().toISOString();
 
     const updatedRecord: Assessment = {
       ...existing,
       ...patch,
       assignment_id: nextAssignmentId,
       assignment: matchedAssignment || existing.assignment,
+      updated_at: now,
     };
 
     if (isSupabaseAvailable() && isUuid(id)) {
       try {
-        const dbPatch: Record<string, unknown> = {};
+        const dbPatch: Record<string, unknown> = {
+          updated_at: now,
+        };
         if (patch.title !== undefined) dbPatch.title = patch.title;
         if (patch.assessment_type !== undefined) dbPatch.assessment_type = patch.assessment_type;
         if (patch.assessment_date !== undefined) dbPatch.assessment_date = patch.assessment_date;
@@ -263,8 +282,13 @@ export const assessmentService = {
         }
         if (Object.keys(dbPatch).length > 0) {
           let { error } = await supabase.from('assessments').update(dbPatch).eq('id', id);
-          if (error && 'scope_key' in dbPatch && (error.code === 'PGRST204' || String(error.message || '').includes('scope_key'))) {
-            const { scope_key: _sk, ...legacyPatch } = dbPatch;
+          if (
+            error &&
+            (error.code === 'PGRST204' ||
+              String(error.message || '').includes('scope_key') ||
+              String(error.message || '').includes('updated_at'))
+          ) {
+            const { scope_key: _sk, updated_at: _ua, ...legacyPatch } = dbPatch;
             if (Object.keys(legacyPatch).length > 0) {
               ({ error } = await supabase.from('assessments').update(legacyPatch).eq('id', id));
             } else {
@@ -346,6 +370,7 @@ export const assessmentService = {
         reportSupabaseOutcome(error);
         if (!error && Array.isArray(data) && data.length > 0) {
           const mergedMap = new Map<string, Grade>();
+          let changedFromRemote = false;
           for (const g of baseGrades) {
             mergedMap.set(`${g.assessment_id}_${g.student_id}`, g);
           }
@@ -354,15 +379,20 @@ export const assessmentService = {
             const existing = mergedMap.get(key);
             if (!existing) {
               mergedMap.set(key, item);
+              changedFromRemote = true;
             } else {
               const remoteMs = getTimeMs(item.updated_at || item.created_at);
               const localMs = getTimeMs(existing.updated_at || existing.created_at);
-              if (remoteMs >= localMs) {
+              if (remoteMs > localMs) {
                 mergedMap.set(key, item);
+                changedFromRemote = true;
               }
             }
           }
           baseGrades = Array.from(mergedMap.values());
+          if (changedFromRemote) {
+            syncService.setLocalCacheSilently(STORAGE_KEYS.GRADES, JSON.stringify(baseGrades));
+          }
         }
       } catch (err) {
         reportSupabaseOutcome(err);
@@ -386,6 +416,7 @@ export const assessmentService = {
     const all = getLocal<Grade[]>(STORAGE_KEYS.GRADES, DEMO_GRADES);
     const students = await academicService.getStudents();
     const updatedGrades: Grade[] = [];
+    const now = new Date().toISOString();
 
     for (const item of entries) {
       const existingIdx = all.findIndex(
@@ -403,8 +434,8 @@ export const assessmentService = {
         student_id: item.studentId,
         score: Math.min(100, Math.max(0, item.score)),
         feedback: item.feedback || null,
-        created_at: existingIdx >= 0 ? all[existingIdx].created_at : new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        created_at: existingIdx >= 0 ? all[existingIdx].created_at : now,
+        updated_at: now,
         student: students.find((s) => s.id === item.studentId),
       };
 
@@ -445,6 +476,7 @@ export const assessmentService = {
     // Teruskan otomatis ke Leger Nilai Rapor untuk semua asesmen Formatif & Sumatif
     await reportService.syncAssessmentToLedger(assessmentId);
     emitSyncEvent([STORAGE_KEYS.GRADES, STORAGE_KEYS.REMEDIAL, 'simpel_subject_ledger_v1']);
+    void syncService.flushMutations();
     return updatedGrades;
   },
 

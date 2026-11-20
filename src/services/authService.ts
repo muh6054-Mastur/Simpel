@@ -9,7 +9,7 @@ import {
 import { AuthUser } from '../types/auth.types';
 import { Profile, UserRole } from '../types/database.types';
 import { DEMO_USERS } from '../lib/demoData';
-import { getDemoUsers } from './userService';
+import { getDemoUsers, sortRolesByPriority } from './userService';
 import { academicService } from './academicService';
 import { syncService } from './syncService';
 
@@ -151,7 +151,14 @@ export async function loginWithEmail(email: string, password?: string): Promise<
       if (!rpcErr && cloudAuth) {
         if (cloudAuth.ok && cloudAuth.user) {
           const cu = cloudAuth.user;
-          const roles: UserRole[] = Array.isArray(cu.roles) && cu.roles.length > 0 ? cu.roles : ['guru'];
+          const syncedMatch = findMatchedAppUser(String(cu.email || normalizedInput).trim().toLowerCase());
+          const rawRoles: UserRole[] =
+            syncedMatch?.roles && syncedMatch.roles.length > 0
+              ? syncedMatch.roles
+              : Array.isArray(cu.roles) && cu.roles.length > 0
+                ? cu.roles
+                : ['guru'];
+          const roles = sortRolesByPriority(rawRoles);
           const resolvedTeacher = await academicService.resolveTeacherForUser({
             id: cu.id,
             email: cu.email,
@@ -310,12 +317,13 @@ export async function loginWithEmail(email: string, password?: string): Promise<
     console.warn('Error reading homeroom class during login:', err);
   }
 
+  const sortedRoles = sortRolesByPriority(matchedUser.roles);
   const authUser: AuthUser = {
     id: matchedUser.id,
     email: matchedUser.email,
     profile,
-    roles: matchedUser.roles,
-    activeRole: matchedUser.roles[0],
+    roles: sortedRoles,
+    activeRole: sortedRoles[0],
     teacherId,
     homeroomClassId,
   };
@@ -382,12 +390,18 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
     updated_at: matchedUser.created_at,
   };
 
+  const sortedRoles = sortRolesByPriority(matchedUser.roles);
+  const preferredActiveRole: UserRole =
+    target === 'kamad' && sortedRoles.includes('kepala_madrasah')
+      ? 'kepala_madrasah'
+      : sortedRoles[0];
+
   const authUser: AuthUser = {
     id: matchedUser.id,
     email: matchedUser.email,
     profile,
-    roles: matchedUser.roles,
-    activeRole: matchedUser.roles[0],
+    roles: sortedRoles,
+    activeRole: preferredActiveRole,
     teacherId,
     homeroomClassId,
   };
@@ -479,7 +493,19 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
     );
   }
 
-  const roles: UserRole[] = rolesData.map((r: { role: UserRole }) => r.role);
+  const supabaseRoles: UserRole[] = rolesData.map((r: { role: UserRole }) => r.role);
+  const resolvedEmail = (profile.email || emailFallback || '').trim().toLowerCase();
+  const syncedAppUser = resolvedEmail
+    ? getDemoUsers().find((u) => u.email.trim().toLowerCase() === resolvedEmail)
+    : undefined;
+
+  const combinedRoles = new Set<UserRole>(
+    syncedAppUser?.roles && syncedAppUser.roles.length > 0 ? syncedAppUser.roles : supabaseRoles
+  );
+  if (supabaseRoles.includes('admin') || resolvedEmail === 'alihsansoborejo@gmail.com') {
+    combinedRoles.add('admin');
+  }
+  const roles = sortRolesByPriority(Array.from(combinedRoles));
 
   // 3. Cari teacher_id dan homeroom_class_id jika terdaftar sebagai guru/wali kelas
   let teacherId: string | null = null;
@@ -511,9 +537,28 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
     resolvedTeacher
   );
 
-  // Peran aktif pertama kali: prioritaskan primary role atau role pertama
+  // Peran aktif: pertahankan pilihan peran user sebelumnya jika masih sah dan tidak baru mendapat peran Kepala Madrasah;
+  // jika belum ada sesi atau baru mendapat peran Kepala Madrasah, aktifkan peran prioritas tertinggi.
+  const persisted = getPersistedSession();
+  const isSamePersistedUser = Boolean(
+    persisted &&
+      (persisted.id === userId || (resolvedEmail && persisted.email.trim().toLowerCase() === resolvedEmail))
+  );
+  const newlyGrantedPrincipal = Boolean(
+    isSamePersistedUser && !persisted!.roles.includes('kepala_madrasah') && roles.includes('kepala_madrasah')
+  );
   const primaryRoleEntry = rolesData.find((r: { is_primary: boolean }) => r.is_primary);
-  const activeRole: UserRole = primaryRoleEntry ? primaryRoleEntry.role : roles[0];
+  const defaultRole: UserRole = roles.includes('kepala_madrasah')
+    ? 'kepala_madrasah'
+    : primaryRoleEntry && roles.includes(primaryRoleEntry.role)
+      ? primaryRoleEntry.role
+      : roles[0];
+
+  const activeRole: UserRole = newlyGrantedPrincipal
+    ? 'kepala_madrasah'
+    : isSamePersistedUser && roles.includes(persisted!.activeRole)
+      ? persisted!.activeRole
+      : defaultRole;
 
   const authUser: AuthUser = {
     id: userId,

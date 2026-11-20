@@ -385,6 +385,7 @@ export interface Assessment {
   kktp: number;
   scope_key?: string | null;
   created_at: string;
+  updated_at?: string;
   assignment?: TeachingAssignment;
 }
 

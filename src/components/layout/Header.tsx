@@ -236,6 +236,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({ onToggleMobileNav, on
                       onClick={() => {
                         switchActiveRole(r);
                         setIsRoleMenuOpen(false);
+                        onNavigate('dashboard');
                       }}
                       className={`w-full flex items-center justify-between px-3 py-2 text-xs text-left transition-colors ${
                         isSelected ? 'bg-emerald-50 text-emerald-950 font-semibold' : 'text-slate-700 hover:bg-emerald-50/50'

@@ -389,13 +389,12 @@ class RealtimeSyncService {
       const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
       if (sessionErr) {
         reportSupabaseOutcome(sessionErr);
-        return;
       }
-      if (!sessionData?.session?.user) return;
+      const hasAuthUser = Boolean(sessionData?.session?.user);
 
-      // 1. Jika simpel_users_cache_v2 ikut berubah, sinkronkan hash kredensial login via RPC admin
+      // 1. Jika simpel_users_cache_v2 ikut berubah saat sesi Auth aktif, sinkronkan hash kredensial login via RPC admin
       const usersMut = batch.find((m) => m.key === 'simpel_users_cache_v2' && m.value);
-      if (usersMut?.value) {
+      if (hasAuthUser && usersMut?.value) {
         try {
           const parsedUsers = JSON.parse(usersMut.value);
           if (Array.isArray(parsedUsers)) {
@@ -410,11 +409,15 @@ class RealtimeSyncService {
         }
       }
 
-      // 2. Siapkan payload app_sync_state (hapus plain-text password dari simpel_users_cache_v2)
+      // 2. Siapkan payload app_sync_state. Key sensitif hanya ditulis oleh sesi Admin terautentikasi;
+      //    key operasional guru/wali kelas (nilai, asesmen, leger, perangkat kelas, jurnal, absensi) tetap disinkronkan.
       const smallRows: Array<{ key: string; value: string | null; revision: number; updated_at: string }> = [];
       const largeRows: Array<{ key: string; value: string | null; revision: number; updated_at: string }> = [];
 
       for (const mut of batch) {
+        if (!hasAuthUser && (mut.key === 'simpel_users_cache_v2' || mut.key === 'simpel_settings')) {
+          continue;
+        }
         let safeValue = mut.value;
         if (mut.key === 'simpel_users_cache_v2' && safeValue) {
           safeValue = this.sanitizeUsersJsonForCloud(safeValue);
@@ -439,6 +442,18 @@ class RealtimeSyncService {
           this.cloudConnected = true;
           this.lastSyncedAt = new Date().toISOString();
           this.updateConnectionStatus();
+        } else if (smallRows.length > 1 && isSupabaseAvailable()) {
+          // Jika satu key ditolak RLS, coba upsert per baris agar key nilai/perangkat kelas tidak ikut terblokir
+          for (const row of smallRows) {
+            if (!isSupabaseAvailable()) break;
+            const { error: singleErr } = await supabase.from('app_sync_state').upsert(row, { onConflict: 'key' });
+            reportSupabaseOutcome(singleErr);
+            if (!singleErr) {
+              this.cloudConnected = true;
+              this.lastSyncedAt = new Date().toISOString();
+              this.updateConnectionStatus();
+            }
+          }
         }
         if (smallErr && !isSupabaseAvailable()) return;
       }
@@ -605,6 +620,46 @@ class RealtimeSyncService {
     return changedKeys;
   }
 
+  public runWithoutMutationTracking(fn: () => void): void {
+    const prev = this.isApplyingRemote;
+    this.isApplyingRemote = true;
+    try {
+      fn();
+      this.snapshotLocalValues();
+    } finally {
+      this.isApplyingRemote = prev;
+    }
+  }
+
+  public setLocalCacheSilently(key: string, value: string): void {
+    if (typeof window === 'undefined') return;
+    const prev = this.isApplyingRemote;
+    this.isApplyingRemote = true;
+    try {
+      const strVal = String(value);
+      if (isSyncedKey(key) && strVal.length > 500_000) {
+        this.inMemoryFallback.set(key, strVal);
+        try {
+          nativeRemoveItem.call(window.localStorage, key);
+        } catch {
+          // ignore
+        }
+      } else {
+        try {
+          nativeSetItem.call(window.localStorage, key, strVal);
+          this.inMemoryFallback.delete(key);
+        } catch {
+          this.inMemoryFallback.set(key, strVal);
+        }
+      }
+      if (isSyncedKey(key)) {
+        this.lastKnownValues.set(key, strVal);
+      }
+    } finally {
+      this.isApplyingRemote = prev;
+    }
+  }
+
   private async pullDeferredKeys(keys: string[]): Promise<void> {
     if (!Array.isArray(keys) || keys.length === 0) return;
 
@@ -699,9 +754,13 @@ class RealtimeSyncService {
             const localCurrent =
               nativeGetItem.call(window.localStorage, row.key) ?? this.inMemoryFallback.get(row.key) ?? null;
             const localUpdatedAt = this.keyUpdatedAt.get(row.key);
+            const isLocalEmptyPlaceholder = localCurrent === null || localCurrent === '[]' || localCurrent === '{}';
+            const isRemoteNonEmpty = Boolean(row.value && row.value !== '[]' && row.value !== '{}');
 
             let shouldApply = false;
             if (localCurrent === null) {
+              shouldApply = true;
+            } else if (isLocalEmptyPlaceholder && isRemoteNonEmpty && !localUpdatedAt) {
               shouldApply = true;
             } else if (row.key === 'simpel_users_cache_v2') {
               try {
@@ -802,9 +861,8 @@ class RealtimeSyncService {
       const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
       if (sessionErr) {
         reportSupabaseOutcome(sessionErr);
-        return;
       }
-      if (!sessionData?.session?.user) return;
+      const hasAuthUser = Boolean(sessionData?.session?.user);
 
       const collected = new Map<string, string>();
       for (let i = 0; i < window.localStorage.length; i++) {
@@ -823,6 +881,9 @@ class RealtimeSyncService {
       const batch: Array<{ key: string; value: string | null; updatedAt: string }> = [];
       const now = new Date().toISOString();
       collected.forEach((val, key) => {
+        // Jangan pernah menimpa cloud dengan array/objek kosong hasil inisialisasi perangkat baru
+        if (val === '[]' || val === '{}') return;
+        if (!hasAuthUser && (key === 'simpel_users_cache_v2' || key === 'simpel_settings')) return;
         batch.push({
           key,
           value: val,
@@ -966,13 +1027,13 @@ class RealtimeSyncService {
         const key = window.localStorage.key(i);
         if (key && isSyncedKey(key)) {
           const val = nativeGetItem.call(window.localStorage, key);
-          if (val !== null) {
+          if (val !== null && val !== '[]' && val !== '{}') {
             mutations.push({ key, value: val, updatedAt: now });
           }
         }
       }
       this.inMemoryFallback.forEach((val, key) => {
-        if (isSyncedKey(key) && val !== null) {
+        if (isSyncedKey(key) && val !== null && val !== '[]' && val !== '{}') {
           mutations.push({ key, value: val, updatedAt: now });
         }
       });
