@@ -68,20 +68,32 @@ function emitLedgerSync(keys: string[]): void {
   window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys } }));
 }
 
+function normalizeTimeMs(value?: string | null): number {
+  if (!value) return 0;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return 0;
+  if (ms > Date.now() + 5 * 60_000) {
+    return ms - 7 * 3600_000;
+  }
+  return ms;
+}
+
+function normalizeToUtcIso(value?: string | null, fallbackIso?: string): string {
+  const ms = normalizeTimeMs(value);
+  if (ms > 0) return new Date(ms).toISOString();
+  return fallbackIso || new Date().toISOString();
+}
+
 function maxTimestamp(...values: Array<string | null | undefined>): string {
-  let best = '';
   let bestMs = 0;
   for (const v of values) {
     if (!v) continue;
-    const ms = Date.parse(v);
-    if (!Number.isNaN(ms) && ms >= bestMs) {
+    const ms = normalizeTimeMs(v);
+    if (ms > bestMs) {
       bestMs = ms;
-      best = v;
-    } else if (!best) {
-      best = v;
     }
   }
-  return best || new Date().toISOString();
+  return bestMs > 0 ? new Date(bestMs).toISOString() : new Date().toISOString();
 }
 
 async function loadMergedAssessmentSources(): Promise<{
@@ -120,16 +132,20 @@ async function loadMergedAssessmentSources(): Promise<{
     reportSupabaseOutcome(firstSupabaseErr);
 
     if (asmRes.status === 'fulfilled' && !asmRes.value.error && Array.isArray(asmRes.value.data)) {
-      const localById = new Map(localAssessments.map((a) => [a.id, a]));
       const byId = new Map<string, Assessment>();
       for (const a of localAssessments) byId.set(a.id, a);
       for (const ra of asmRes.value.data as Assessment[]) {
-        const lm = localById.get(ra.id);
-        byId.set(ra.id, {
-          ...ra,
-          scope_key: ra.scope_key ?? lm?.scope_key ?? null,
-          assignment: ra.assignment || lm?.assignment,
-        });
+        const lm = byId.get(ra.id);
+        const rMs = normalizeTimeMs(ra.updated_at || ra.created_at);
+        const lMs = lm ? normalizeTimeMs(lm.updated_at || lm.created_at) : 0;
+        if (!lm || rMs > lMs) {
+          byId.set(ra.id, {
+            ...ra,
+            scope_key: ra.scope_key ?? lm?.scope_key ?? null,
+            assignment: ra.assignment || lm?.assignment,
+            updated_at: normalizeToUtcIso(ra.updated_at, ra.created_at),
+          });
+        }
       }
       assessments = Array.from(byId.values());
     }
@@ -146,33 +162,35 @@ async function loadMergedAssessmentSources(): Promise<{
 
       const byKey = new Map<string, Grade>();
       for (const lg of localGrades) {
+        if (!lg || !lg.assessment_id || !lg.student_id) continue;
         const k = `${lg.assessment_id}__${lg.student_id}`;
         const prev = byKey.get(k);
         if (!prev) {
           byKey.set(k, lg);
         } else {
-          const pMs = Date.parse(prev.updated_at || prev.created_at || '') || 0;
-          const cMs = Date.parse(lg.updated_at || lg.created_at || '') || 0;
+          const pMs = normalizeTimeMs(prev.updated_at || prev.created_at);
+          const cMs = normalizeTimeMs(lg.updated_at || lg.created_at);
           if (cMs >= pMs) byKey.set(k, lg);
         }
       }
-      const nowMs = Date.now();
       for (const rg of grdRes.value.data as Grade[]) {
         if (unsyncedKeys.has(`${rg.assessment_id}_${rg.student_id}`)) {
           continue;
         }
         const key = `${rg.assessment_id}__${rg.student_id}`;
         const existing = byKey.get(key);
+        const normalizedRemote: Grade = {
+          ...rg,
+          score: Number(rg.score),
+          updated_at: normalizeToUtcIso(rg.updated_at, rg.created_at),
+        };
         if (!existing) {
-          byKey.set(key, rg);
+          byKey.set(key, normalizedRemote);
         } else {
-          let rMs = Date.parse(rg.updated_at || rg.created_at || '') || 0;
-          if (rMs > nowMs + 5 * 60_000) {
-            rMs -= 7 * 3600_000;
-          }
-          const lMs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
+          const rMs = normalizeTimeMs(rg.updated_at || rg.created_at);
+          const lMs = normalizeTimeMs(existing.updated_at || existing.created_at);
           if (rMs > lMs) {
-            byKey.set(key, rg);
+            byKey.set(key, normalizedRemote);
           }
         }
       }
@@ -187,9 +205,9 @@ async function loadMergedAssessmentSources(): Promise<{
         if (!existing) {
           byId.set(rr.id, rr);
         } else {
-          const rMs = Date.parse((rr as RemedialRecord & { updated_at?: string }).updated_at || rr.created_at || '') || 0;
-          const lMs = Date.parse((existing as RemedialRecord & { updated_at?: string }).updated_at || existing.created_at || '') || 0;
-          if (rMs >= lMs || (existing.score_after === null && rr.score_after !== null)) {
+          const rMs = normalizeTimeMs((rr as RemedialRecord & { updated_at?: string }).updated_at || rr.created_at);
+          const lMs = normalizeTimeMs((existing as RemedialRecord & { updated_at?: string }).updated_at || existing.created_at);
+          if (rMs > lMs || (existing.score_after === null && rr.score_after !== null)) {
             byId.set(rr.id, {
               ...existing,
               ...rr,
@@ -561,7 +579,12 @@ export const reportService = {
 
         if (!result[g.student_id]) result[g.student_id] = {};
         const prevSlot = result[g.student_id][slot];
-        if (!prevSlot || !prevSlot.isSummative || isSummative) {
+        if (
+          !prevSlot ||
+          (!prevSlot.isSummative && isSummative) ||
+          (prevSlot.isSummative === isSummative &&
+            normalizeTimeMs(updatedAt) >= normalizeTimeMs(prevSlot.updatedAt))
+        ) {
           result[g.student_id][slot] = {
             score: effectiveScore,
             updatedAt,
@@ -638,10 +661,11 @@ export const reportService = {
           const slotManualAt =
             existing?.manualEditedSlots?.[slot] ??
             (existing?.manualEditedSlots ? undefined : existing?.manualEditedAt);
-          const shouldApply =
-            currentVal === 0 ||
-            !slotManualAt ||
-            Date.parse(entry.updatedAt) > Date.parse(slotManualAt);
+          const entryMs = normalizeTimeMs(entry.updatedAt);
+          const manualMs = normalizeTimeMs(slotManualAt);
+          const shouldApply = slotManualAt
+            ? entryMs > manualMs
+            : currentVal === 0 || entryMs > 0;
 
           if (shouldApply && currentVal !== entry.score) {
             if (slot === 'stsScore') sts = entry.score;

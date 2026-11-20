@@ -17,7 +17,12 @@ import { EvaluationScopeKey } from '../../types/curriculum.types';
 import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
-import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
+import {
+  useRealtimeSync,
+  notifyDomFormSaved,
+  markDomUnsavedEdit,
+  clearDomUnsavedEdit,
+} from '../../hooks/useRealtimeSync';
 import {
   Award,
   Plus,
@@ -106,9 +111,13 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   // Input Map: studentId -> { score: number, feedback: string }
   const [scoreInputs, setScoreInputs] = useState<Record<string, { score: number; feedback: string }>>({});
   const [rawScores, setRawScores] = useState<Record<string, string>>({});
+  const [unsavedCount, setUnsavedCount] = useState<number>(0);
 
   const dirtyStudentIdsRef = useRef<Set<string>>(new Set());
   const isSavingRef = useRef<boolean>(false);
+  const lastLocalSaveAtRef = useRef<number>(0);
+  const hasLoadedOnceRef = useRef<boolean>(false);
+  const suppressNextContextReloadRef = useRef<boolean>(false);
   const loadSeqRef = useRef<number>(0);
   const scoreInputsRef = useRef(scoreInputs);
   scoreInputsRef.current = scoreInputs;
@@ -169,6 +178,24 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     }
   }, [scopeContext?.scopeKey]);
 
+  const resolveLinkedAssignment = useCallback(
+    (asm: Assessment | undefined, asgsPool: TeachingAssignment[]): TeachingAssignment | undefined => {
+      if (!asm) return undefined;
+      const direct = asgsPool.find((a) => a.id === asm.assignment_id);
+      if (direct) return direct;
+      if (asm.assignment?.class_id && asm.assignment?.subject_id) {
+        const byPair = asgsPool.find(
+          (a) =>
+            a.class_id === asm.assignment?.class_id &&
+            a.subject_id === asm.assignment?.subject_id
+        );
+        if (byPair) return byPair;
+      }
+      return asm.assignment;
+    },
+    []
+  );
+
   const getStudentsForAssessment = useCallback(
     (
       asm: Assessment | undefined,
@@ -177,7 +204,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       membersPool: ClassMember[]
     ): Student[] => {
       if (!asm) return [];
-      const linkedAsg = asm.assignment || asgsPool.find((a) => a.id === asm.assignment_id);
+      const linkedAsg = resolveLinkedAssignment(asm, asgsPool);
       const classId = linkedAsg?.class_id;
       if (!classId) return stdsPool;
       const classMemberList = membersPool.filter((m) => m.class_id === classId);
@@ -193,7 +220,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
           return a.full_name.localeCompare(b.full_name, 'id');
         });
     },
-    []
+    [resolveLinkedAssignment]
   );
 
   const buildScoreInputsForAssessment = useCallback(
@@ -225,7 +252,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       return;
     }
     const reqId = ++loadSeqRef.current;
-    if (!silent) {
+    const showSpinner = !silent && !hasLoadedOnceRef.current;
+    if (showSpinner) {
       setIsLoading(true);
     }
     try {
@@ -243,21 +271,30 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         return;
       }
 
-      setResolvedTeacher(teacher);
-      setSettings(sys);
-      if (sys?.kktp_default && (!silent || !showFormModalRef.current)) {
-        setFormKktp(Number(sys.kktp_default));
-      }
-
       const scopedAsgs =
         activeRole === 'guru'
           ? academicService.filterAssignmentsForUser(asgs, user, teacher, tchs)
           : asgs;
       const scopedAsgIds = new Set(scopedAsgs.map((a) => a.id));
+      const scopedClassSubjPairs = new Set(
+        scopedAsgs.map((a) => `${a.class_id}_${a.subject_id}`)
+      );
       const scopedAsms =
         activeRole === 'guru'
-          ? asms.filter((a) => scopedAsgIds.has(a.assignment_id))
+          ? asms.filter(
+              (a) =>
+                scopedAsgIds.has(a.assignment_id) ||
+                (a.assignment?.class_id &&
+                  a.assignment?.subject_id &&
+                  scopedClassSubjPairs.has(`${a.assignment.class_id}_${a.assignment.subject_id}`))
+            )
           : asms;
+
+      setResolvedTeacher(teacher);
+      setSettings(sys);
+      if (sys?.kktp_default && (!silent || !showFormModalRef.current)) {
+        setFormKktp(Number(sys.kktp_default));
+      }
 
       setAssignments(scopedAsgs);
       setAssessments(scopedAsms);
@@ -277,7 +314,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       }
 
       const matchingContextAsms = scopedAsms.filter((a) => {
-        const linked = a.assignment || scopedAsgs.find((asg) => asg.id === a.assignment_id);
+        const linked = resolveLinkedAssignment(a, scopedAsgs);
         if (!linked) return false;
         const matchSubj = !effectiveSubjectId || linked.subject_id === effectiveSubjectId;
         const matchClass = !effectiveClassId || linked.class_id === effectiveClassId;
@@ -302,20 +339,27 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       if (filteredPool.length > 0) {
         const targetAsm =
           filteredPool.find((a) => a.id === currentSelectedId) ||
-          (scopeContext?.scopeKey && currentScopeTab === scopeContext.scopeKey
-            ? filteredPool.find((a) => getAssessmentEffectiveScopeKey(a) === scopeContext.scopeKey)
-            : undefined) ||
           filteredPool[0];
         const isSwitchingAssessment = targetAsm.id !== currentSelectedId;
         if (isSwitchingAssessment) {
           dirtyStudentIdsRef.current.clear();
+          setUnsavedCount(0);
+          clearDomUnsavedEdit();
           setRawScores({});
           selectedAssessmentIdRef.current = targetAsm.id;
           setSelectedAssessmentId(targetAsm.id);
         }
 
+        // Jika pengguna sedang punya perubahan belum disimpan di instrumen aktif, jangan timpa inputnya saat reload latar belakang
+        if (!isSwitchingAssessment && silent && dirtyStudentIdsRef.current.size > 0) {
+          return;
+        }
+
         const grds = await assessmentService.getGrades(targetAsm.id);
         if (reqId !== loadSeqRef.current || isSavingRef.current) {
+          return;
+        }
+        if (!isSwitchingAssessment && dirtyStudentIdsRef.current.size > 0) {
           return;
         }
         setGrades(grds);
@@ -341,6 +385,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         });
       } else {
         dirtyStudentIdsRef.current.clear();
+        setUnsavedCount(0);
+        clearDomUnsavedEdit();
         setRawScores({});
         selectedAssessmentIdRef.current = '';
         setSelectedAssessmentId('');
@@ -350,9 +396,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     } catch (err) {
       console.error('Gagal memuat data penilaian:', err);
     } finally {
-      if (!silent) {
-        setIsLoading(false);
-      }
+      hasLoadedOnceRef.current = true;
+      setIsLoading(false);
     }
   }, [
     activeRole,
@@ -363,14 +408,18 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     effectiveAssignmentId,
     effectiveSubjectId,
     effectiveClassId,
-    scopeContext?.scopeKey,
     onlyActiveContext,
     buildScoreInputsForAssessment,
     getAssessmentEffectiveScopeKey,
+    resolveLinkedAssignment,
   ]);
 
   useEffect(() => {
-    void loadData(false);
+    if (suppressNextContextReloadRef.current) {
+      suppressNextContextReloadRef.current = false;
+      return;
+    }
+    void loadData(hasLoadedOnceRef.current);
   }, [loadData]);
 
   useRealtimeSync(
@@ -387,20 +436,39 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     ],
     () => {
       setScopeVersion((v) => v + 1);
-      if (!isSavingRef.current) {
+      if (
+        !isSavingRef.current &&
+        dirtyStudentIdsRef.current.size === 0 &&
+        Date.now() - lastLocalSaveAtRef.current >= 4000
+      ) {
         void loadData(true);
       }
-    }
+    },
+    false,
+    () =>
+      isSavingRef.current ||
+      dirtyStudentIdsRef.current.size > 0 ||
+      Date.now() - lastLocalSaveAtRef.current < 4000
   );
 
   // Daftar asesmen sesuai konteks mapel/kelas (sebelum filter tab Lingkup Materi & jenis)
   const contextAssessments = useMemo(() => {
     return assessments.filter((a) => {
       if (onlyActiveContext && effectiveSubjectId) {
-        const linked = a.assignment || assignments.find((asg) => asg.id === a.assignment_id);
+        const linked = resolveLinkedAssignment(a, assignments);
         if (!linked) return false;
         if (effectiveAssignmentId) {
-          if (linked.id !== effectiveAssignmentId) return false;
+          if (
+            linked.id !== effectiveAssignmentId &&
+            !(
+              effectiveSubjectId &&
+              effectiveClassId &&
+              linked.subject_id === effectiveSubjectId &&
+              linked.class_id === effectiveClassId
+            )
+          ) {
+            return false;
+          }
         } else {
           if (linked.subject_id !== effectiveSubjectId) return false;
           if (effectiveClassId && linked.class_id !== effectiveClassId) return false;
@@ -408,7 +476,15 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       }
       return true;
     });
-  }, [assessments, assignments, onlyActiveContext, effectiveSubjectId, effectiveClassId, effectiveAssignmentId]);
+  }, [
+    assessments,
+    assignments,
+    onlyActiveContext,
+    effectiveSubjectId,
+    effectiveClassId,
+    effectiveAssignmentId,
+    resolveLinkedAssignment,
+  ]);
 
   // Daftar Tab Lingkup Materi / Unit Evaluasi (Sumatif LM 1..4, STS, SAS, dan kustom)
   const scopeTabs = useMemo(() => {
@@ -498,6 +574,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     async (asmId: string, asmOverride?: Assessment) => {
       const reqId = ++loadSeqRef.current;
       dirtyStudentIdsRef.current.clear();
+      setUnsavedCount(0);
+      clearDomUnsavedEdit();
       setRawScores({});
       selectedAssessmentIdRef.current = asmId;
       setSelectedAssessmentId(asmId);
@@ -515,8 +593,14 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         }
       }
 
-      const linked = asm?.assignment || assignments.find((a) => a.id === asm?.assignment_id);
-      if (linked) {
+      const linked = resolveLinkedAssignment(asm, assignments);
+      if (
+        linked &&
+        (linked.id !== effectiveAssignmentId ||
+          linked.subject_id !== effectiveSubjectId ||
+          linked.class_id !== effectiveClassId)
+      ) {
+        suppressNextContextReloadRef.current = true;
         setWorkspaceSelection({
           assignmentId: linked.id,
           subjectId: linked.subject_id,
@@ -560,7 +644,11 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       students,
       classMembers,
       settings?.kktp_default,
+      effectiveAssignmentId,
+      effectiveSubjectId,
+      effectiveClassId,
       buildScoreInputsForAssessment,
+      resolveLinkedAssignment,
       setWorkspaceSelection,
     ]
   );
@@ -614,6 +702,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     } else {
       loadSeqRef.current++;
       dirtyStudentIdsRef.current.clear();
+      setUnsavedCount(0);
+      clearDomUnsavedEdit();
       setRawScores({});
       selectedAssessmentIdRef.current = '';
       setSelectedAssessmentId('');
@@ -661,6 +751,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     } else {
       loadSeqRef.current++;
       dirtyStudentIdsRef.current.clear();
+      setUnsavedCount(0);
+      clearDomUnsavedEdit();
       setRawScores({});
       selectedAssessmentIdRef.current = '';
       setSelectedAssessmentId('');
@@ -811,11 +903,12 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         setTypeFilter('all');
       }
       dirtyStudentIdsRef.current.clear();
+      setUnsavedCount(0);
+      clearDomUnsavedEdit();
       setRawScores({});
       selectedAssessmentIdRef.current = created.id;
       setSelectedAssessmentId(created.id);
       setAssessments((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
-      await loadData(false);
       await handleSelectAssessment(created.id, created);
       showToast(`Daftar isian nilai "${title}" siap diisi (tanpa perlu kisi-kisi/soal).`, 'success');
     } catch (err) {
@@ -866,6 +959,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
             lastPropScopeKeyRef.current = nextScopeTab;
             onScopeChange?.(nextScopeTab);
           }
+          setAssessments((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
         }
         if (typeFilterRef.current !== 'all' && typeFilterRef.current !== formType) {
           typeFilterRef.current = 'all';
@@ -873,7 +967,6 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         }
         selectedAssessmentIdRef.current = editingAssessmentId;
         setSelectedAssessmentId(editingAssessmentId);
-        await loadData(false);
         await handleSelectAssessment(editingAssessmentId, updated || undefined);
         showToast(`Daftar nilai "${formTitle}" berhasil diperbarui.`, 'success');
       } else {
@@ -900,11 +993,12 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
           setTypeFilter('all');
         }
         dirtyStudentIdsRef.current.clear();
+        setUnsavedCount(0);
+        clearDomUnsavedEdit();
         setRawScores({});
         selectedAssessmentIdRef.current = created.id;
         setSelectedAssessmentId(created.id);
         setAssessments((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
-        await loadData(false);
         await handleSelectAssessment(created.id, created);
         showToast(`Daftar nilai "${created.title}" berhasil dibuat dan siap diisi.`, 'success');
       }
@@ -931,11 +1025,14 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   const handleRawScoreChange = (studentId: string, raw: string) => {
     dirtyStudentIdsRef.current.add(studentId);
+    setUnsavedCount(dirtyStudentIdsRef.current.size);
+    markDomUnsavedEdit();
     setRawScores((prev) => ({
       ...prev,
       [studentId]: raw,
     }));
-    if (raw.trim() === '') {
+    const normalizedRaw = raw.replace(',', '.').trim();
+    if (normalizedRaw === '') {
       setScoreInputs((prev) => ({
         ...prev,
         [studentId]: {
@@ -945,7 +1042,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       }));
       return;
     }
-    const parsed = Number(raw);
+    const parsed = Number(normalizedRaw);
     const safeVal = Number.isNaN(parsed) ? 0 : Math.min(100, Math.max(0, parsed));
     setScoreInputs((prev) => ({
       ...prev,
@@ -967,6 +1064,8 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   const handleFeedbackChange = (studentId: string, text: string) => {
     dirtyStudentIdsRef.current.add(studentId);
+    setUnsavedCount(dirtyStudentIdsRef.current.size);
+    markDomUnsavedEdit();
     setScoreInputs((prev) => ({
       ...prev,
       [studentId]: {
@@ -978,18 +1077,22 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   const currentAsm =
     visibleAssessments.find((a) => a.id === selectedAssessmentId) ||
-    (activeScopeTab === 'all' && typeFilter === 'all'
-      ? assessments.find((a) => a.id === selectedAssessmentId)
-      : undefined);
+    assessments.find((a) => a.id === selectedAssessmentId);
   const currentKktp = currentAsm ? Number(currentAsm.kktp) : Number(settings?.kktp_default || 75);
   const displayedStudents = getStudentsForAssessment(currentAsm, assignments, students, classMembers);
 
   const handleApplyUniformScore = () => {
     if (!currentAsm || displayedStudents.length === 0) return;
-    const numericVal = uniformScore.trim() === '' ? currentKktp : Math.min(100, Math.max(0, Number(uniformScore)));
+    const parsedUniform = Number(uniformScore.replace(',', '.').trim());
+    const numericVal =
+      uniformScore.trim() === ''
+        ? currentKktp
+        : Math.min(100, Math.max(0, parsedUniform));
     if (Number.isNaN(numericVal)) return;
 
     displayedStudents.forEach((s) => dirtyStudentIdsRef.current.add(s.id));
+    setUnsavedCount(dirtyStudentIdsRef.current.size);
+    markDomUnsavedEdit();
     setRawScores({});
     setScoreInputs((prev) => {
       const next = { ...prev };
@@ -1006,11 +1109,16 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   const handleSaveGrades = async () => {
     if (!currentAsm || isSavingRef.current) return;
+    if (displayedStudents.length === 0) {
+      showToast('Belum ada siswa terdaftar di rombel untuk instrumen nilai ini.', 'error');
+      return;
+    }
     const targetAsm = currentAsm;
     const targetStudents = displayedStudents;
     const kktpVal = Number(targetAsm.kktp || settings?.kktp_default || 75);
 
     isSavingRef.current = true;
+    lastLocalSaveAtRef.current = Date.now();
     loadSeqRef.current++;
     setIsSaving(true);
 
@@ -1021,7 +1129,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         const raw = latestRaw[s.id];
         let resolvedScore: number;
         if (raw !== undefined && raw.trim() !== '') {
-          const parsed = Number(raw);
+          const parsed = Number(raw.replace(',', '.').trim());
           resolvedScore = Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : kktpVal;
         } else {
           const existingScore = latestInputs[s.id]?.score;
@@ -1038,19 +1146,20 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       });
 
       const savedGrades = await assessmentService.saveGrades(targetAsm.id, entries);
-      const grds = await assessmentService.getGrades(targetAsm.id);
-      const effectiveGrades = grds.length > 0 ? grds : savedGrades;
+      const savedByStudentId = new Map(savedGrades.map((g) => [g.student_id, g]));
 
-      setGrades(effectiveGrades);
+      setGrades((prevGrades) => {
+        const preservedOthers = prevGrades.filter((g) => !savedByStudentId.has(g.student_id));
+        return [...preservedOthers, ...savedGrades];
+      });
       setRawScores({});
 
       const savedEntryByStudent = new Map(entries.map((e) => [e.studentId, e]));
-      const persistedByStudent = new Map(effectiveGrades.map((g) => [g.student_id, g]));
       setScoreInputs((prev) => {
         const next = { ...prev };
         targetStudents.forEach((s) => {
           const sent = savedEntryByStudent.get(s.id);
-          const persisted = persistedByStudent.get(s.id);
+          const persisted = savedByStudentId.get(s.id);
           const cur = prev[s.id];
           const modifiedDuringSave =
             sent &&
@@ -1074,7 +1183,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         return next;
       });
 
-      const linked = targetAsm.assignment || assignments.find((a) => a.id === targetAsm.assignment_id);
+      const remainingDirty = dirtyStudentIdsRef.current.size;
+      setUnsavedCount(remainingDirty);
+
+      const linked = resolveLinkedAssignment(targetAsm, assignments);
       const targetSlot = reportService.resolveLedgerSlotForAssessment(
         targetAsm,
         linked?.subject_id,
@@ -1097,9 +1209,14 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       console.error('Gagal menyimpan nilai:', err);
       showToast('Gagal menyimpan daftar nilai siswa.', 'error');
     } finally {
+      lastLocalSaveAtRef.current = Date.now();
       isSavingRef.current = false;
       setIsSaving(false);
-      notifyDomFormSaved();
+      if (dirtyStudentIdsRef.current.size > 0) {
+        markDomUnsavedEdit();
+      } else {
+        notifyDomFormSaved();
+      }
     }
   };
 
@@ -1124,7 +1241,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   const handleConfirmSyncToLedger = async () => {
     if (!currentAsm) return;
-    const linked = currentAsm.assignment || assignments.find((a) => a.id === currentAsm.assignment_id);
+    const linked = resolveLinkedAssignment(currentAsm, assignments);
     if (!linked?.class_id || !linked?.subject_id) {
       showToast('Penugasan kelas & mapel tidak ditemukan untuk dikirim ke leger.', 'error');
       return;
@@ -1821,7 +1938,15 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         {currentAsm && displayedStudents.length > 0 && (
           <div className="p-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <span className="text-[11px] text-slate-500">
-              Tekan tombol <strong>Simpan Nilai</strong> untuk menyimpan seluruh skor dan umpan balik siswa.
+              {unsavedCount > 0 ? (
+                <span className="font-semibold text-amber-800">
+                  {unsavedCount} perubahan nilai/catatan belum disimpan — klik Simpan Semua Nilai.
+                </span>
+              ) : (
+                <>
+                  Tekan tombol <strong>Simpan Nilai</strong> untuk menyimpan seluruh skor dan umpan balik siswa.
+                </>
+              )}
             </span>
             <button
               onClick={handleSaveGrades}

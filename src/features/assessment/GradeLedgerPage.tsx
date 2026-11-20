@@ -11,7 +11,12 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
-import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
+import {
+  useRealtimeSync,
+  notifyDomFormSaved,
+  markDomUnsavedEdit,
+  clearDomUnsavedEdit,
+} from '../../hooks/useRealtimeSync';
 import {
   FileSpreadsheet,
   Award,
@@ -68,6 +73,8 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const [rawScores, setRawScores] = useState<Record<string, string>>({});
   const isLedgerDirtyRef = useRef<boolean>(false);
   const isSavingRef = useRef<boolean>(false);
+  const lastLocalSaveAtRef = useRef<number>(0);
+  const hasLoadedOnceRef = useRef<boolean>(false);
   const loadSeqRef = useRef<number>(0);
   const rawScoresRef = useRef(rawScores);
   rawScoresRef.current = rawScores;
@@ -142,7 +149,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         scopedClasses[0]?.id ||
         '';
 
-      setSelectedClassId(targetClass);
+      if (targetClass !== selectedClassId) {
+        setSelectedClassId(targetClass);
+      }
 
       const validSubjectsForClass = isTeacherRole
         ? scopedSubjects.filter((s) =>
@@ -160,9 +169,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         validSubjectsForClass[0]?.id ||
         '';
 
-      setSelectedSubjectId(targetSubject);
+      if (targetSubject !== selectedSubjectId) {
+        setSelectedSubjectId(targetSubject);
+      }
 
-      if (!targetClass || (viewMode === 'per-mapel' && !targetSubject)) {
+      if (
+        (!targetClass || (viewMode === 'per-mapel' && !targetSubject)) &&
+        !isSavingRef.current &&
+        !isLedgerDirtyRef.current &&
+        Date.now() - lastLocalSaveAtRef.current >= 4000
+      ) {
         setSubjectScores([]);
         setOverallRows([]);
         setOverallSubjects([]);
@@ -175,7 +191,12 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   };
 
   const loadLedgerData = async (silent = false) => {
-    if (silent && isSavingRef.current) {
+    if (
+      silent &&
+      (isSavingRef.current ||
+        isLedgerDirtyRef.current ||
+        Date.now() - lastLocalSaveAtRef.current < 4000)
+    ) {
       return;
     }
     const reqId = ++loadSeqRef.current;
@@ -189,8 +210,11 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       return;
     }
 
-    if (!silent) {
+    const shouldShowSpinner = !silent && !hasLoadedOnceRef.current;
+    if (shouldShowSpinner) {
       setIsLoading(true);
+    }
+    if (!silent) {
       setRawScores({});
     }
     try {
@@ -199,10 +223,15 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       if (viewMode === 'per-mapel') {
         if (!silent || !isLedgerDirtyRef.current) {
           const scores = await reportService.getSubjectLedger(selectedClassId, selectedSubjectId);
-          if (reqId !== loadSeqRef.current || isSavingRef.current || (silent && isLedgerDirtyRef.current)) {
+          if (
+            reqId !== loadSeqRef.current ||
+            isSavingRef.current ||
+            (silent && (isLedgerDirtyRef.current || Date.now() - lastLocalSaveAtRef.current < 4000))
+          ) {
             return;
           }
           setSubjectScores(scores);
+          hasLoadedOnceRef.current = true;
         }
       } else {
         const { subjects: sbjs, rows } = await reportService.getClassOverallLedger(selectedClassId);
@@ -211,11 +240,12 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         }
         setOverallSubjects(sbjs);
         setOverallRows(rows);
+        hasLoadedOnceRef.current = true;
       }
     } catch (err) {
       console.error('Gagal memuat data leger nilai:', err);
     } finally {
-      if (!silent) {
+      if (shouldShowSpinner || !silent) {
         setIsLoading(false);
       }
     }
@@ -246,6 +276,8 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   useEffect(() => {
     isLedgerDirtyRef.current = false;
+    hasLoadedOnceRef.current = false;
+    clearDomUnsavedEdit();
     setRawScores({});
     if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
       void loadLedgerData(false);
@@ -276,13 +308,30 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       'simpel_semesters',
     ],
     () => {
-      if (isSavingRef.current) return;
+      if (
+        isSavingRef.current ||
+        isLedgerDirtyRef.current ||
+        Date.now() - lastLocalSaveAtRef.current < 4000
+      ) {
+        return;
+      }
       void loadBaseData().then(() => {
-        if (!isSavingRef.current && selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
+        if (
+          !isSavingRef.current &&
+          !isLedgerDirtyRef.current &&
+          Date.now() - lastLocalSaveAtRef.current >= 4000 &&
+          selectedClassId &&
+          (viewMode === 'rekap-kelas' || selectedSubjectId)
+        ) {
           void loadLedgerData(true);
         }
       });
-    }
+    },
+    true,
+    () =>
+      isSavingRef.current ||
+      isLedgerDirtyRef.current ||
+      Date.now() - lastLocalSaveAtRef.current < 4000
   );
 
   // Handle Score Change
@@ -293,6 +342,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   ) => {
     if (isLocked) return;
     isLedgerDirtyRef.current = true;
+    markDomUnsavedEdit();
 
     const kktpVal = Number(settings?.kktp_default ?? 75);
     const subjName =
@@ -362,11 +412,12 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       ...prev,
       [key]: raw,
     }));
-    if (raw.trim() === '') {
+    const normalizedRaw = raw.replace(',', '.');
+    if (normalizedRaw.trim() === '') {
       handleScoreChange(studentId, field, 0);
       return;
     }
-    const parsed = Number(raw);
+    const parsed = Number(normalizedRaw);
     handleScoreChange(studentId, field, Number.isNaN(parsed) ? 0 : Math.min(100, Math.max(0, parsed)));
   };
 
@@ -390,6 +441,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   ) => {
     if (isLocked) return;
     isLedgerDirtyRef.current = true;
+    markDomUnsavedEdit();
     setSubjectScores((prev) =>
       prev.map((item) =>
         item.studentId === studentId
@@ -402,6 +454,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const handleResetStudentDesc = (studentId: string) => {
     if (isLocked) return;
     isLedgerDirtyRef.current = true;
+    markDomUnsavedEdit();
     const kktpVal = Number(settings?.kktp_default ?? 75);
     const subjName =
       availableSubjectsForClass.find((s) => s.id === selectedSubjectId)?.name ||
@@ -472,6 +525,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
     setSubjectScores(regenerated);
     setEditingDescStudentId(null);
+    lastLocalSaveAtRef.current = Date.now();
     await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, regenerated, false);
     isLedgerDirtyRef.current = false;
     notifyDomFormSaved();
@@ -483,10 +537,12 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const handleSaveLedger = async () => {
     if (isSavingRef.current) return;
     isSavingRef.current = true;
+    lastLocalSaveAtRef.current = Date.now();
     loadSeqRef.current++;
     setIsSaving(true);
     try {
       await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, subjectScores, true);
+      lastLocalSaveAtRef.current = Date.now();
       isLedgerDirtyRef.current = false;
       setRawScores({});
       notifyDomFormSaved();
@@ -503,7 +559,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   // Tarik Nilai Terbaru dari Daftar Nilai & Remedial
   const handlePullFromGrades = async () => {
-    if (!selectedClassId || !selectedSubjectId || isLocked) return;
+    if (!selectedClassId || !selectedSubjectId || isLocked || isSavingRef.current) return;
+    isSavingRef.current = true;
+    lastLocalSaveAtRef.current = Date.now();
     setIsSaving(true);
     try {
       const { updatedStudents, filledSlots } = await reportService.syncFromAssessmentsForSubject(
@@ -511,7 +569,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         selectedSubjectId,
         { forceOverwrite: true }
       );
-      await loadLedgerData();
+      isLedgerDirtyRef.current = false;
+      notifyDomFormSaved();
+      await loadLedgerData(false);
       if (filledSlots > 0) {
         setStatusMessage(
           `Berhasil menarik ${filledSlots} entri nilai untuk ${updatedStudents} siswa dari Daftar Nilai & Remedial ke Leger.`
@@ -524,6 +584,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       console.error('Gagal menarik nilai dari Daftar Nilai:', err);
       setStatusMessage('Gagal menyinkronkan nilai dari Daftar Nilai.');
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
     }
   };

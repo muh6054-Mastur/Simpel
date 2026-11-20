@@ -83,6 +83,20 @@ export function isUserCurrentlyEditing(): boolean {
   return false;
 }
 
+export function markDomUnsavedEdit(): void {
+  if (typeof window === 'undefined') return;
+  const state = getGuardState();
+  state.hasUnsavedDomEdit = true;
+  state.lastEditAt = Date.now();
+}
+
+export function clearDomUnsavedEdit(): void {
+  if (typeof window === 'undefined') return;
+  const state = getGuardState();
+  state.hasUnsavedDomEdit = false;
+  state.lastEditAt = 0;
+}
+
 export function notifyDomFormSaved(): void {
   if (typeof window === 'undefined') return;
   const state = getGuardState();
@@ -128,11 +142,10 @@ function ensureGlobalEditListeners(): void {
 
     const btnType = (btn.getAttribute('type') || '').toLowerCase();
     const label = (btn.textContent || '').trim().toLowerCase();
+    // Catatan: Jangan sertakan "terapkan" di sini karena "Terapkan ke Semua" membuat perubahan belum tersimpan
     const isSaveOrCloseAction =
       btnType === 'submit' ||
-      /\b(simpan|save|kirim|perbarui|tambahkan|update|submit|terapkan|batal|tutup|close|cancel)\b/i.test(
-        label
-      );
+      /\b(simpan|save|kirim|perbarui|submit|batal|tutup|close|cancel)\b/i.test(label);
 
     if (isSaveOrCloseAction) {
       state.hasUnsavedDomEdit = false;
@@ -163,10 +176,13 @@ function ensureGlobalEditListeners(): void {
 export function useRealtimeSync(
   watchedKeys: string[] | '*',
   onRemoteUpdate: () => void,
-  includeFileSync = false
+  includeFileSync = false,
+  shouldDefer?: () => boolean
 ): void {
   const callbackRef = useRef(onRemoteUpdate);
   callbackRef.current = onRemoteUpdate;
+  const shouldDeferRef = useRef(shouldDefer);
+  shouldDeferRef.current = shouldDefer;
 
   const keysSignature = watchedKeys === '*' ? '*' : watchedKeys.join('|');
 
@@ -178,8 +194,11 @@ export function useRealtimeSync(
     let retryTimer: number | null = null;
     let pendingReload = false;
 
+    const isDeferredNow = () =>
+      isUserCurrentlyEditing() || Boolean(shouldDeferRef.current?.());
+
     const flushOrDefer = () => {
-      if (isUserCurrentlyEditing()) {
+      if (isDeferredNow()) {
         pendingReload = true;
         if (retryTimer === null) {
           retryTimer = window.setInterval(() => {
@@ -190,7 +209,7 @@ export function useRealtimeSync(
               }
               return;
             }
-            if (!isUserCurrentlyEditing()) {
+            if (!isDeferredNow()) {
               pendingReload = false;
               if (retryTimer !== null) {
                 window.clearInterval(retryTimer);
@@ -233,7 +252,7 @@ export function useRealtimeSync(
       debounceTimer = window.setTimeout(() => {
         debounceTimer = null;
         flushOrDefer();
-      }, 80);
+      }, 120);
     };
 
     const handleRemoteSync = (event: Event) => {

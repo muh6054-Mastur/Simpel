@@ -77,7 +77,13 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   onNavigate,
 }) => {
   const { user, activeRole } = useAuth();
-  const { selectedSubjectId, selectedClassLevel, setWorkspaceSelection } = useWorkspace();
+  const {
+    selectedSubjectId,
+    selectedClassId,
+    selectedClassLevel,
+    selectedAssignmentId,
+    setWorkspaceSelection,
+  } = useWorkspace();
   const [activeTab, setActiveTab] = useState<EvaluationTab>(defaultTab);
 
   // Master & Assignment States
@@ -241,11 +247,39 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
 
           setSelectedSubject(preferredSbj);
           setSelectedClass(preferredLevel);
-          const matchedCls = clss.find((c) => c.level === preferredLevel);
-          const matchedAsg = relevantAsgs.find(
-            (a) => a.subject_id === preferredSbj && (!matchedCls || a.class_id === matchedCls.id)
-          );
-          if (matchedAsg) {
+
+          const existingValidAsg =
+            (selectedAssignmentId &&
+              slotsForSbj.find((a) => {
+                if (a.id !== selectedAssignmentId) return false;
+                const lvl = a.class?.level || clss.find((c) => c.id === a.class_id)?.level;
+                return lvl === preferredLevel;
+              })) ||
+            undefined;
+
+          const matchedCls =
+            (selectedClassId &&
+              clss.find(
+                (c) =>
+                  c.id === selectedClassId &&
+                  c.level === preferredLevel &&
+                  slotsForSbj.some((a) => a.class_id === c.id)
+              )) ||
+            clss.find((c) => c.level === preferredLevel && slotsForSbj.some((a) => a.class_id === c.id)) ||
+            clss.find((c) => c.level === preferredLevel);
+
+          const matchedAsg =
+            existingValidAsg ||
+            slotsForSbj.find((a) => !matchedCls || a.class_id === matchedCls.id) ||
+            slotsForSbj[0];
+
+          if (
+            matchedAsg &&
+            (selectedSubjectId !== preferredSbj ||
+              selectedClassId !== matchedAsg.class_id ||
+              selectedClassLevel !== preferredLevel ||
+              selectedAssignmentId !== matchedAsg.id)
+          ) {
             setWorkspaceSelection({
               subjectId: preferredSbj,
               classId: matchedAsg.class_id,
@@ -274,7 +308,17 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     } finally {
       setIsLoadingRefs(false);
     }
-  }, [activeRole, user?.id, user?.email, user?.teacherId, user?.profile?.full_name, selectedSubjectId, selectedClassLevel]);
+  }, [
+    activeRole,
+    user?.id,
+    user?.email,
+    user?.teacherId,
+    user?.profile?.full_name,
+    selectedSubjectId,
+    selectedClassId,
+    selectedClassLevel,
+    selectedAssignmentId,
+  ]);
 
   useEffect(() => {
     void loadData();
@@ -287,7 +331,6 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
       'simpel_mi_lingkup_materi_custom_v1',
       'simpel_mi_lingkup_materi_hidden_v1',
       'simpel_assessments',
-      'simpel_grades',
       'simpel_assignments',
       'simpel_subjects',
       'simpel_classes',
@@ -373,13 +416,24 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     allSubjects.find((s) => s.id === selectedSubject);
   const currentSubjectName = currentSubjectObj?.name || 'Mata Pelajaran';
   const currentClassObj =
+    (selectedClassId &&
+      (availableClasses.find((c) => c.id === selectedClassId && c.level === selectedClass) ||
+        allClasses.find((c) => c.id === selectedClassId && c.level === selectedClass))) ||
     availableClasses.find((c) => c.level === selectedClass) ||
     allClasses.find((c) => c.level === selectedClass);
-  const currentAssignmentObj = teacherAssignments.find(
-    (a) =>
-      a.subject_id === selectedSubject &&
-      (!currentClassObj || a.class_id === currentClassObj.id)
-  );
+  const currentAssignmentObj =
+    (selectedAssignmentId &&
+      teacherAssignments.find(
+        (a) =>
+          a.id === selectedAssignmentId &&
+          a.subject_id === selectedSubject &&
+          (!currentClassObj || a.class_id === currentClassObj.id)
+      )) ||
+    teacherAssignments.find(
+      (a) =>
+        a.subject_id === selectedSubject &&
+        (!currentClassObj || a.class_id === currentClassObj.id)
+    );
   const filteredAssessmentsCount = assessments.filter((a) => {
     if (currentAssignmentObj) return a.assignment_id === currentAssignmentObj.id;
     const asg = a.assignment || teacherAssignments.find((t) => t.id === a.assignment_id);
@@ -404,7 +458,10 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
       ? presetTemplates.find((s) => s.scope_key === selectedScope)
       : undefined) ||
     availableScopes[0];
-  const effectiveScope = currentScopeConfig?.scope_key || '';
+  const effectiveScope =
+    currentScopeConfig?.scope_key ||
+    (activeTab === 'asesmen-nilai' || activeTab === 'remedial-pengayaan' ? selectedScope : '') ||
+    '';
 
   // Filter butir kisi-kisi per Mapel, Kelas, dan Lingkup Materi / STS / SAS
   const filteredKisi = effectiveScope

@@ -93,6 +93,14 @@ function normalizeRemoteGradeTimeMs(value?: string | null): number {
   return ms;
 }
 
+function normalizeToUtcIso(value?: string | null, fallbackIso?: string): string {
+  const normalizedMs = normalizeRemoteGradeTimeMs(value);
+  if (normalizedMs > 0) {
+    return new Date(normalizedMs).toISOString();
+  }
+  return fallbackIso || new Date().toISOString();
+}
+
 function stripGradeRelations(grade: Grade): Grade {
   const { student: _student, ...rest } = grade;
   return rest;
@@ -107,8 +115,8 @@ function dedupeGradesToMap(grades: Grade[]): Map<string, Grade> {
     if (!prev) {
       map.set(key, g);
     } else {
-      const prevMs = getTimeMs(prev.updated_at || prev.created_at);
-      const currMs = getTimeMs(g.updated_at || g.created_at);
+      const prevMs = normalizeRemoteGradeTimeMs(prev.updated_at || prev.created_at);
+      const currMs = normalizeRemoteGradeTimeMs(g.updated_at || g.created_at);
       if (currMs >= prevMs) {
         map.set(key, g);
       }
@@ -225,12 +233,13 @@ export const assessmentService = {
               });
               changedFromRemote = true;
             } else {
-              const remoteMs = getTimeMs(item.updated_at || item.created_at);
-              const localMs = getTimeMs(localMeta.updated_at || localMeta.created_at);
+              const remoteMs = normalizeRemoteGradeTimeMs(item.updated_at || item.created_at);
+              const localMs = normalizeRemoteGradeTimeMs(localMeta.updated_at || localMeta.created_at);
               if (remoteMs > localMs) {
                 mergedMap.set(item.id, {
                   ...item,
                   scope_key: item.scope_key ?? localMeta.scope_key ?? null,
+                  updated_at: normalizeToUtcIso(item.updated_at, item.created_at),
                 });
                 changedFromRemote = true;
               }
@@ -248,12 +257,35 @@ export const assessmentService = {
     }
 
     const assignments = await academicService.getTeachingAssignments();
-    let hydrated = baseItems.map((a) => ({
-      ...a,
-      assignment: assignments.find((asg) => asg.id === a.assignment_id) || a.assignment,
-    }));
+    let hydrated = baseItems.map((a) => {
+      const direct = assignments.find((asg) => asg.id === a.assignment_id);
+      const byPair =
+        !direct && a.assignment?.class_id && a.assignment?.subject_id
+          ? assignments.find(
+              (asg) =>
+                asg.class_id === a.assignment?.class_id &&
+                asg.subject_id === a.assignment?.subject_id
+            )
+          : undefined;
+      return {
+        ...a,
+        assignment: direct || byPair || a.assignment,
+      };
+    });
 
-    if (assignmentId) hydrated = hydrated.filter((a) => a.assignment_id === assignmentId);
+    if (assignmentId) {
+      const targetAsg = assignments.find((asg) => asg.id === assignmentId);
+      hydrated = hydrated.filter((a) => {
+        if (a.assignment_id === assignmentId) return true;
+        if (targetAsg && a.assignment) {
+          return (
+            a.assignment.class_id === targetAsg.class_id &&
+            a.assignment.subject_id === targetAsg.subject_id
+          );
+        }
+        return false;
+      });
+    }
     return hydrated.sort((a, b) => b.assessment_date.localeCompare(a.assessment_date));
   },
 
@@ -440,22 +472,31 @@ export const assessmentService = {
           for (const item of data as Grade[]) {
             const key = `${item.assessment_id}_${item.student_id}`;
             const recentLocal = recentLocalGradeSaves.get(key);
-            if (recentLocal && nowMs - recentLocal.savedAtMs < 5 * 60_000 && !recentLocal.syncedToDb) {
+            if (
+              recentLocal &&
+              ((!recentLocal.syncedToDb && nowMs - recentLocal.savedAtMs < 5 * 60_000) ||
+                nowMs - recentLocal.savedAtMs < 20_000)
+            ) {
               continue;
             }
             if (unsyncedKeys.has(key)) {
               continue;
             }
 
+            const normalizedItem: Grade = {
+              ...stripGradeRelations(item),
+              score: Number(item.score),
+              updated_at: normalizeToUtcIso(item.updated_at, item.created_at),
+            };
             const existing = mergedMap.get(key);
             if (!existing) {
-              mergedMap.set(key, stripGradeRelations(item));
+              mergedMap.set(key, normalizedItem);
               changedFromRemote = true;
             } else {
               const remoteMs = normalizeRemoteGradeTimeMs(item.updated_at || item.created_at);
-              const localMs = getTimeMs(existing.updated_at || existing.created_at);
+              const localMs = normalizeRemoteGradeTimeMs(existing.updated_at || existing.created_at);
               if (remoteMs > localMs) {
-                mergedMap.set(key, stripGradeRelations(item));
+                mergedMap.set(key, normalizedItem);
                 changedFromRemote = true;
               }
             }
@@ -544,19 +585,54 @@ export const assessmentService = {
           student_id: g.student_id,
           score: g.score,
           feedback: g.feedback,
-          updated_at: g.updated_at,
+          updated_at: now,
         });
 
+        const ensureParentAssessmentInSupabase = async (): Promise<boolean> => {
+          try {
+            const localAsms = getLocal<Assessment[]>(STORAGE_KEYS.ASSESSMENTS, DEMO_ASSESSMENTS);
+            const targetAsm = localAsms.find((a) => a.id === assessmentId);
+            if (!targetAsm || !isUuid(targetAsm.assignment_id)) return false;
+            const { assignment: _a, ...dbAsm } = targetAsm;
+            const payload = {
+              ...dbAsm,
+              updated_at: normalizeToUtcIso(dbAsm.updated_at, now),
+            };
+            let { error: asmErr } = await supabase
+              .from('assessments')
+              .upsert(payload, { onConflict: 'id' });
+            if (
+              asmErr &&
+              (asmErr.code === 'PGRST204' ||
+                String(asmErr.message || '').includes('scope_key') ||
+                String(asmErr.message || '').includes('updated_at'))
+            ) {
+              const { scope_key: _sk, updated_at: _ua, ...legacyAsm } = payload;
+              ({ error: asmErr } = await supabase
+                .from('assessments')
+                .upsert(legacyAsm, { onConflict: 'id' }));
+            }
+            reportSupabaseOutcome(asmErr);
+            return !asmErr;
+          } catch {
+            return false;
+          }
+        };
+
         let syncedMetaChanged = false;
-        const applyReturnedRow = (row: Grade) => {
+        const applyReturnedRow = (row: Grade): boolean => {
           const key = `${row.assessment_id}_${row.student_id}`;
           const current = gradeMap.get(key);
+          if (current && Number(row.score) !== Number(current.score)) {
+            // DB mengembalikan nilai berbeda (misal trigger menolak perubahan); pertahankan nilai lokal
+            return false;
+          }
           if (current) {
             gradeMap.set(key, {
               ...current,
               id: row.id || current.id,
               created_at: row.created_at || current.created_at,
-              updated_at: row.updated_at || current.updated_at,
+              updated_at: now,
             });
             syncedMetaChanged = true;
           }
@@ -565,29 +641,51 @@ export const assessmentService = {
             rec.syncedToDb = true;
           }
           unsyncedKeys.delete(key);
+          return true;
         };
 
         try {
-          const { data, error } = await supabase
+          let { data, error } = await supabase
             .from('grades')
             .upsert(syncable.map(buildRow), { onConflict: 'assessment_id,student_id' })
             .select('id, assessment_id, student_id, score, feedback, created_at, updated_at');
+
+          // Jika assessment belum sempat tersimpan di Supabase (FK 23503 atau RLS 42501 karena row parent belum ada), auto-sync assessment dulu lalu coba ulang
+          if (
+            error &&
+            (error.code === '23503' ||
+              error.code === '42501' ||
+              String(error.message || '').includes('grades_assessment_id_fkey') ||
+              String(error.message || '').toLowerCase().includes('row-level security'))
+          ) {
+            const healed = await ensureParentAssessmentInSupabase();
+            if (healed) {
+              ({ data, error } = await supabase
+                .from('grades')
+                .upsert(syncable.map(buildRow), { onConflict: 'assessment_id,student_id' })
+                .select('id, assessment_id, student_id, score, feedback, created_at, updated_at'));
+            }
+          }
           reportSupabaseOutcome(error);
 
           if (!error && Array.isArray(data)) {
+            const acceptedKeys = new Set<string>();
             for (const row of data as Grade[]) {
-              applyReturnedRow(row);
+              if (applyReturnedRow(row)) {
+                acceptedKeys.add(`${row.assessment_id}_${row.student_id}`);
+              }
             }
-            // Tandai baris yang tidak ikut kembali bila ada
-            const returnedSet = new Set((data as Grade[]).map((r) => `${r.assessment_id}_${r.student_id}`));
+            // Tandai baris yang tidak ikut kembali atau ditolak nilainya sebagai unsynced agar tidak tertimpa data lama
             for (const g of syncable) {
               const key = `${g.assessment_id}_${g.student_id}`;
-              if (!returnedSet.has(key)) {
+              if (!acceptedKeys.has(key)) {
                 unsyncedKeys.add(key);
+                const rec = recentLocalGradeSaves.get(key);
+                if (rec) rec.syncedToDb = false;
               }
             }
           } else {
-            // Fallback per-baris agar kegagalan 1 siswa (misal FK belum tersinkron) tidak menggagalkan seluruh kelas
+            // Fallback per-baris agar kegagalan 1 siswa/baris tidak menggagalkan seluruh kelas
             for (const g of syncable) {
               const key = `${g.assessment_id}_${g.student_id}`;
               try {
@@ -596,8 +694,8 @@ export const assessmentService = {
                   .upsert(buildRow(g), { onConflict: 'assessment_id,student_id' })
                   .select('id, assessment_id, student_id, score, feedback, created_at, updated_at')
                   .maybeSingle();
-                if (!singleErr && singleData) {
-                  applyReturnedRow(singleData as Grade);
+                if (!singleErr && singleData && applyReturnedRow(singleData as Grade)) {
+                  // synced
                 } else {
                   unsyncedKeys.add(key);
                 }
@@ -732,20 +830,29 @@ export const assessmentService = {
           for (const item of data as Grade[]) {
             const key = `${item.assessment_id}_${item.student_id}`;
             const recentLocal = recentLocalGradeSaves.get(key);
-            if (recentLocal && nowMs - recentLocal.savedAtMs < 5 * 60_000 && !recentLocal.syncedToDb) {
+            if (
+              recentLocal &&
+              ((!recentLocal.syncedToDb && nowMs - recentLocal.savedAtMs < 5 * 60_000) ||
+                nowMs - recentLocal.savedAtMs < 20_000)
+            ) {
               continue;
             }
             if (unsyncedKeys.has(key)) {
               continue;
             }
+            const normalizedItem: Grade = {
+              ...item,
+              score: Number(item.score),
+              updated_at: normalizeToUtcIso(item.updated_at, item.created_at),
+            };
             const existing = mergedMap.get(key);
             if (!existing) {
-              mergedMap.set(key, item);
+              mergedMap.set(key, normalizedItem);
             } else {
               const remoteMs = normalizeRemoteGradeTimeMs(item.updated_at || item.created_at);
-              const localMs = getTimeMs(existing.updated_at || existing.created_at);
+              const localMs = normalizeRemoteGradeTimeMs(existing.updated_at || existing.created_at);
               if (remoteMs > localMs) {
-                mergedMap.set(key, item);
+                mergedMap.set(key, normalizedItem);
               }
             }
           }
@@ -879,8 +986,8 @@ export const assessmentService = {
             if (!existing) {
               mergedMap.set(item.id, item);
             } else {
-              const remoteMs = getTimeMs((item as any).updated_at || item.created_at);
-              const localMs = getTimeMs((existing as any).updated_at || existing.created_at);
+              const remoteMs = normalizeRemoteGradeTimeMs((item as any).updated_at || item.created_at);
+              const localMs = normalizeRemoteGradeTimeMs((existing as any).updated_at || existing.created_at);
               if (remoteMs > localMs || (item.score_after !== null && existing.score_after === null)) {
                 mergedMap.set(item.id, {
                   ...existing,
