@@ -72,7 +72,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           : local.profile,
       };
       if (JSON.stringify(nextUser) !== JSON.stringify(local)) {
-        localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
+        try {
+          localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
+        } catch {
+          // ignore restricted storage
+        }
       }
       return nextUser;
     };
@@ -150,7 +154,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
           } else if (event === 'SIGNED_OUT') {
             setUser(null);
-            localStorage.removeItem('simpel_mi_session_user');
+            try {
+              localStorage.removeItem('simpel_mi_session_user');
+            } catch {
+              // ignore restricted storage
+            }
           }
         }
       );
@@ -217,7 +225,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActiveRole(role);
     const updated = { ...user, activeRole: role };
     setUser(updated);
-    localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
+    try {
+      localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
+    } catch {
+      // ignore restricted storage
+    }
   };
 
   const refreshProfile = async () => {
@@ -246,7 +258,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
             if (JSON.stringify(nextUser) !== JSON.stringify(user)) {
               setUser(nextUser);
-              localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
+              try {
+                localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
+              } catch {
+                // ignore restricted storage
+              }
             }
             return;
           }
@@ -312,7 +328,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       if (JSON.stringify(updated) !== JSON.stringify(user)) {
         setUser(updated);
-        localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
+        try {
+          localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
+        } catch {
+          // ignore restricted storage
+        }
       }
     } catch (err: any) {
       console.warn('Gagal memuat ulang profil:', err?.message);

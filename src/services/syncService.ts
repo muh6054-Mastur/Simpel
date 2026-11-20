@@ -463,7 +463,12 @@ class RealtimeSyncService {
     const self = this;
 
     Storage.prototype.getItem = function (key: string): string | null {
-      const val = nativeGetItem.call(this, key);
+      let val: string | null = null;
+      try {
+        val = nativeGetItem.call(this, key);
+      } catch {
+        val = null;
+      }
       if (val === null && this === window.localStorage && self.inMemoryFallback.has(key)) {
         return self.inMemoryFallback.get(key) ?? null;
       }
@@ -534,7 +539,11 @@ class RealtimeSyncService {
     };
 
     Storage.prototype.removeItem = function (key: string) {
-      nativeRemoveItem.call(this, key);
+      try {
+        nativeRemoveItem.call(this, key);
+      } catch {
+        // ignore restricted storage errors
+      }
       if (this === window.localStorage) {
         self.inMemoryFallback.delete(key);
       }
@@ -802,7 +811,12 @@ class RealtimeSyncService {
           this.recordKeyUpdatedAt(key, entry.updatedAt, false);
         }
 
-        const currentLocal = nativeGetItem.call(window.localStorage, key) ?? this.inMemoryFallback.get(key) ?? null;
+        let currentLocal: string | null = null;
+        try {
+          currentLocal = nativeGetItem.call(window.localStorage, key) ?? this.inMemoryFallback.get(key) ?? null;
+        } catch {
+          currentLocal = this.inMemoryFallback.get(key) ?? null;
+        }
 
         let remoteValue = entry?.value ?? null;
         if (key === 'simpel_users_cache_v2' && remoteValue) {
@@ -817,7 +831,11 @@ class RealtimeSyncService {
 
         if (remoteValue === null) {
           if (currentLocal !== null) {
-            nativeRemoveItem.call(window.localStorage, key);
+            try {
+              nativeRemoveItem.call(window.localStorage, key);
+            } catch {
+              // ignore
+            }
             this.inMemoryFallback.delete(key);
             this.lastKnownValues.set(key, null);
             changedKeys.push(key);
@@ -941,9 +959,20 @@ class RealtimeSyncService {
 
     try {
       // Tahap 1: Cek metadata ringan saja (key, revision, updated_at) agar hemat kuota egres Supabase
-      const { data: metaRows, error: metaErr } = await supabase
+      const metaQueryPromise = supabase
         .from('app_sync_state')
         .select('key, revision, updated_at');
+
+      const metaResult = options?.fastOnly
+        ? await Promise.race([
+            metaQueryPromise,
+            new Promise<{ data: null; error: { message: string } }>((resolve) =>
+              window.setTimeout(() => resolve({ data: null, error: { message: 'Supabase fast metadata timeout' } }), 3500)
+            ),
+          ])
+        : await metaQueryPromise;
+
+      const { data: metaRows, error: metaErr } = metaResult as { data: any; error: any };
 
       reportSupabaseOutcome(metaErr);
       if (metaErr) {
@@ -1149,10 +1178,11 @@ class RealtimeSyncService {
     this.isPulling = true;
 
     const useFast = options?.priorityFast ?? (sinceRevision === 0);
+    let timeout: number | undefined;
 
     try {
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), useFast ? 6000 : 12000);
+      timeout = window.setTimeout(() => controller.abort(), useFast ? 2500 : 12000);
       const params = new URLSearchParams();
       if (sinceRevision > 0) params.set('since', String(sinceRevision));
       if (useFast) params.set('priority', 'fast');
@@ -1162,7 +1192,6 @@ class RealtimeSyncService {
         cache: 'no-store',
         signal: controller.signal,
       });
-      window.clearTimeout(timeout);
 
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('application/json')) {
@@ -1230,6 +1259,9 @@ class RealtimeSyncService {
       this.updateConnectionStatus();
       console.warn('[Sync] Pull skipped/retried:', err);
     } finally {
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout);
+      }
       this.isPulling = false;
     }
   }
