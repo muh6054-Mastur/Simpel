@@ -186,7 +186,9 @@ export const DriveDocumentUploadModal: React.FC<DriveDocumentUploadModalProps> =
       : subjects;
 
   const currentDriveConfig = driveConfigSnapshot;
-  const isAppsScriptActive = fileStorageService.isAppsScriptActive(currentDriveConfig);
+  const driveStatus = fileStorageService.getDriveStatusInfo(currentDriveConfig);
+  const isAppsScriptActive = driveStatus.isHealthy;
+  const isAppsScriptError = driveStatus.isError;
   const selectedClsPreview = classes.find((c) => c.id === docClassId);
   const selectedSbjPreview = subjects.find((s) => s.id === docSubjectId);
   const docTypeCfgPreview = CURRICULUM_DOC_TYPES.find((t) => t.value === docType);
@@ -478,7 +480,9 @@ export const DriveDocumentUploadModal: React.FC<DriveDocumentUploadModalProps> =
         {/* Status Koneksi Google Drive */}
         <div
           className={`mb-4 rounded-xl p-3 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-            isAppsScriptActive || isDriveConnected
+            isAppsScriptError
+              ? 'bg-rose-50/80 border-rose-200'
+              : isAppsScriptActive || isDriveConnected
               ? 'bg-emerald-50/80 border-emerald-200'
               : 'bg-amber-50/70 border-amber-200'
           }`}
@@ -486,17 +490,31 @@ export const DriveDocumentUploadModal: React.FC<DriveDocumentUploadModalProps> =
           <div className="flex items-start gap-2.5">
             <FolderSync
               className={`w-4 h-4 shrink-0 mt-0.5 ${
-                isAppsScriptActive || isDriveConnected ? 'text-emerald-700' : 'text-amber-700'
+                isAppsScriptError
+                  ? 'text-rose-700'
+                  : isAppsScriptActive || isDriveConnected
+                  ? 'text-emerald-700'
+                  : 'text-amber-700'
               }`}
             />
             <div className="text-[11px]">
-              {isAppsScriptActive ? (
+              {isAppsScriptError ? (
+                <>
+                  <p className="font-bold text-rose-950">
+                    Koneksi Google Apps Script Perlu Perbaikan (Upload Drive Tertunda)
+                  </p>
+                  <p className="text-rose-800 mt-0.5">
+                    {driveStatus.errorMessage ||
+                      'Web App Apps Script gagal dihubungi. Berkas tetap tersimpan di daftar arsip aplikasi & akan otomatis dikirim setelah Admin memperbaiki URL Apps Script.'}
+                  </p>
+                </>
+              ) : isAppsScriptActive ? (
                 <>
                   <p className="font-bold text-emerald-950">
                     Google Drive Aktif (Apps Script Tanpa Login · {currentDriveConfig.ownerEmail || 'alihsansoborejo@gmail.com'})
                   </p>
                   <p className="text-emerald-800">
-                    Berkas otomatis tersimpan ke Google Drive {currentDriveConfig.ownerEmail || 'alihsansoborejo@gmail.com'} dari perangkat mana pun tanpa login.
+                    Berkas langsung terkirim ke Google Drive {currentDriveConfig.ownerEmail || 'alihsansoborejo@gmail.com'} dari perangkat mana pun tanpa login.
                   </p>
                   <p className="mt-1 font-mono text-[10px] bg-white/80 px-2 py-1 rounded border border-emerald-200 text-emerald-900">
                     Folder tujuan: {fullDriveFolderPreview}

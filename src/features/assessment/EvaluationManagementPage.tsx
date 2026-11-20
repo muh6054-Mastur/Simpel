@@ -3,7 +3,13 @@ import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { academicService } from '../../services/academicService';
 import { assessmentService } from '../../services/assessmentService';
+import { curriculumService } from '../../services/curriculumService';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
+import {
+  fileStorageService,
+  StoredDocumentFile,
+  isRealDriveFileUrl,
+} from '../../services/fileStorageService';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
@@ -13,6 +19,7 @@ import {
   SystemSettings,
   Teacher,
   Assessment,
+  DocumentLink,
 } from '../../types/database.types';
 import {
   KisiKisiItem,
@@ -24,6 +31,7 @@ import { GradesPage } from './GradesPage';
 import { RemedialEnrichmentPage } from './RemedialEnrichmentPage';
 import { LearningAnalysisPage } from './LearningAnalysisPage';
 import { DriveDocumentUploadModal } from '../../components/curriculum/DriveDocumentUploadModal';
+import { FilePreviewModal } from '../../components/curriculum/FilePreviewModal';
 import {
   Award,
   Plus,
@@ -44,6 +52,10 @@ import {
   Edit2,
   HardDrive,
   FolderOpen,
+  Eye,
+  Download,
+  ExternalLink,
+  FolderSync,
 } from 'lucide-react';
 
 export type EvaluationTab =
@@ -91,6 +103,12 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   const [kisiList, setKisiList] = useState<KisiKisiItem[]>([]);
   const [soalList, setSoalList] = useState<SoalAsesmenItem[]>([]);
   const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [uploadedEvalDocs, setUploadedEvalDocs] = useState<DocumentLink[]>([]);
+  const [storedFilesList, setStoredFilesList] = useState<StoredDocumentFile[]>([]);
+  const [previewDocState, setPreviewDocState] = useState<{
+    file: StoredDocumentFile;
+    docId?: string;
+  } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ kind: 'kisi' | 'soal'; id: string; label: string } | null>(null);
   const [pendingDeleteScope, setPendingDeleteScope] = useState<LingkupMateriConfig | null>(null);
 
@@ -163,7 +181,7 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     setSoalList(curriculumWorkspaceService.getSoalList());
 
     try {
-      const [sbjs, clss, asgs, sys, years, sems, teacher, asms, tchs] = await Promise.all([
+      const [sbjs, clss, asgs, sys, years, sems, teacher, asms, tchs, docs, files] = await Promise.all([
         academicService.getSubjects(),
         academicService.getClasses(),
         academicService.getTeachingAssignments(),
@@ -173,6 +191,8 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
         academicService.resolveTeacherForUser(user),
         assessmentService.getAssessments(),
         academicService.getTeachers(),
+        curriculumService.getDocuments(),
+        fileStorageService.getAllFiles(),
       ]);
 
       setAllSubjects(sbjs);
@@ -180,6 +200,14 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
       setSettings(sys);
       setResolvedTeacher(teacher);
       setAssessments(asms);
+      setUploadedEvalDocs(
+        docs.filter(
+          (d) =>
+            d.document_type === 'Kisi-Kisi Asesmen' ||
+            d.document_type === 'Naskah Soal Asesmen'
+        )
+      );
+      setStoredFilesList(files);
       if (sys?.kktp_default) setKktpDefault(Number(sys.kktp_default));
 
       const actYear = years.find((y) => y.id === sys.active_academic_year_id || y.is_active) || years[0];
@@ -265,6 +293,8 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
       'simpel_classes',
       'simpel_teachers',
       'simpel_users_cache_v2',
+      'simpel_curriculum_documents',
+      'simpel_drive_files_v1',
     ],
     () => {
       void loadData();
@@ -274,6 +304,37 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   const notify = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3500);
+  };
+
+  const handlePreviewStoredFile = async (doc: DocumentLink) => {
+    let stored = doc.file_id ? await fileStorageService.getFileById(doc.file_id) : null;
+    if (!stored && doc.google_drive_url && isRealDriveFileUrl(doc.google_drive_url)) {
+      stored = {
+        id: doc.file_id || doc.id,
+        name: doc.title,
+        size: 0,
+        mimeType: 'application/pdf',
+        category: doc.document_type,
+        uploadedBy: doc.teacher?.full_name || 'Guru Madrasah',
+        uploadedAt: doc.created_at || new Date().toISOString(),
+        googleDriveUrl: doc.google_drive_url,
+      };
+    }
+    if (!stored) {
+      notify('Berkas fisik tidak ditemukan di perangkat ini. Silakan buka via tautan Google Drive.');
+      return;
+    }
+    setPreviewDocState({ file: stored, docId: doc.id });
+  };
+
+  const handleDownloadStoredFile = async (doc: DocumentLink) => {
+    if (!doc.file_id) return;
+    const stored = await fileStorageService.getFileById(doc.file_id);
+    if (!stored) {
+      notify('Berkas fisik tidak ditemukan di perangkat ini. Silakan unduh melalui Google Drive.');
+      return;
+    }
+    fileStorageService.downloadStoredFile(stored);
   };
 
   const availableSubjects: Subject[] =
@@ -1309,6 +1370,112 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
               </tbody>
             </table>
           </div>
+
+          {(() => {
+            const evalDocsForTab = uploadedEvalDocs.filter((d) => {
+              if (d.document_type !== 'Kisi-Kisi Asesmen') return false;
+              if (activeRole === 'guru') {
+                const tid = resolvedTeacher?.id || user?.teacherId || user?.id;
+                if (tid && d.teacher_id !== tid && d.teacher?.id !== tid) return false;
+              }
+              if (selectedSubject && d.subject_id && d.subject_id !== selectedSubject) return false;
+              if (currentClassObj?.id && d.class_id && d.class_id !== currentClassObj.id) return false;
+              return true;
+            });
+
+            return (
+              <div className="border-t border-emerald-200 bg-slate-50/70 p-4 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <FolderSync className="w-4 h-4 text-emerald-700" />
+                    <span>Daftar Berkas Kisi-Kisi Terunggah ({evalDocsForTab.length})</span>
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setShowDriveModal(true)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-[11px] cursor-pointer"
+                  >
+                    <HardDrive className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Unggah Berkas Kisi-Kisi</span>
+                  </button>
+                </div>
+
+                {evalDocsForTab.length === 0 ? (
+                  <p className="text-[11px] text-slate-500 italic">
+                    Belum ada berkas Kisi-Kisi Asesmen yang diunggah untuk mata pelajaran &amp; kelas ini.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-200 bg-white rounded-xl border border-slate-200">
+                    {evalDocsForTab.map((doc) => {
+                      const stored = doc.file_id
+                        ? storedFilesList.find((f) => f.id === doc.file_id)
+                        : undefined;
+                      const driveUrl =
+                        (isRealDriveFileUrl(stored?.googleDriveUrl) && stored?.googleDriveUrl) ||
+                        (isRealDriveFileUrl(doc.google_drive_url) && doc.google_drive_url) ||
+                        '';
+                      return (
+                        <div
+                          key={doc.id}
+                          className="px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <p className="text-xs font-bold text-slate-900 truncate">{doc.title}</p>
+                            <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                              <span
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold border ${
+                                  driveUrl
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}
+                              >
+                                {driveUrl ? 'Terkirim ke Google Drive' : 'Arsip Lokal (Belum di Drive)'}
+                              </span>
+                              <span>Status: <strong>{doc.status}</strong></span>
+                              {stored?.size ? <span>({Math.max(1, Math.round(stored.size / 1024))} KB)</span> : null}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                            {(doc.file_id || driveUrl) && (
+                              <button
+                                type="button"
+                                onClick={() => void handlePreviewStoredFile(doc)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-[11px] cursor-pointer"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>Preview Dokumen</span>
+                              </button>
+                            )}
+                            {doc.file_id && (
+                              <button
+                                type="button"
+                                onClick={() => void handleDownloadStoredFile(doc)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] cursor-pointer"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>Unduh</span>
+                              </button>
+                            )}
+                            {driveUrl && (
+                              <a
+                                href={driveUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-semibold text-[11px]"
+                              >
+                                <span>Buka Drive</span>
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
         )
       )}
@@ -1470,6 +1637,112 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
               ))
             )}
           </div>
+
+          {(() => {
+            const soalDocsForTab = uploadedEvalDocs.filter((d) => {
+              if (d.document_type !== 'Naskah Soal Asesmen') return false;
+              if (activeRole === 'guru') {
+                const tid = resolvedTeacher?.id || user?.teacherId || user?.id;
+                if (tid && d.teacher_id !== tid && d.teacher?.id !== tid) return false;
+              }
+              if (selectedSubject && d.subject_id && d.subject_id !== selectedSubject) return false;
+              if (currentClassObj?.id && d.class_id && d.class_id !== currentClassObj.id) return false;
+              return true;
+            });
+
+            return (
+              <div className="border-t border-emerald-200 bg-slate-50/70 p-4 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <FolderSync className="w-4 h-4 text-emerald-700" />
+                    <span>Daftar Berkas Naskah Soal Terunggah ({soalDocsForTab.length})</span>
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setShowDriveModal(true)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-[11px] cursor-pointer"
+                  >
+                    <HardDrive className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Unggah Naskah Soal</span>
+                  </button>
+                </div>
+
+                {soalDocsForTab.length === 0 ? (
+                  <p className="text-[11px] text-slate-500 italic">
+                    Belum ada berkas Naskah Soal Asesmen yang diunggah untuk mata pelajaran &amp; kelas ini.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-200 bg-white rounded-xl border border-slate-200">
+                    {soalDocsForTab.map((doc) => {
+                      const stored = doc.file_id
+                        ? storedFilesList.find((f) => f.id === doc.file_id)
+                        : undefined;
+                      const driveUrl =
+                        (isRealDriveFileUrl(stored?.googleDriveUrl) && stored?.googleDriveUrl) ||
+                        (isRealDriveFileUrl(doc.google_drive_url) && doc.google_drive_url) ||
+                        '';
+                      return (
+                        <div
+                          key={doc.id}
+                          className="px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <p className="text-xs font-bold text-slate-900 truncate">{doc.title}</p>
+                            <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                              <span
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold border ${
+                                  driveUrl
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}
+                              >
+                                {driveUrl ? 'Terkirim ke Google Drive' : 'Arsip Lokal (Belum di Drive)'}
+                              </span>
+                              <span>Status: <strong>{doc.status}</strong></span>
+                              {stored?.size ? <span>({Math.max(1, Math.round(stored.size / 1024))} KB)</span> : null}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                            {(doc.file_id || driveUrl) && (
+                              <button
+                                type="button"
+                                onClick={() => void handlePreviewStoredFile(doc)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-[11px] cursor-pointer"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>Preview Dokumen</span>
+                              </button>
+                            )}
+                            {doc.file_id && (
+                              <button
+                                type="button"
+                                onClick={() => void handleDownloadStoredFile(doc)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] cursor-pointer"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>Unduh</span>
+                              </button>
+                            )}
+                            {driveUrl && (
+                              <a
+                                href={driveUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-semibold text-[11px]"
+                              >
+                                <span>Buka Drive</span>
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
         )
       )}
@@ -2000,6 +2273,28 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
               ? `"${doc.title}" diarsipkan${uploadedToDrive ? ' ke Google Drive' : ''} & dikirim ke Dashboard Kepala Madrasah.`
               : `"${doc.title}" disimpan sebagai draf arsip.`
           );
+          void loadData();
+        }}
+      />
+
+      <FilePreviewModal
+        isOpen={Boolean(previewDocState)}
+        file={previewDocState?.file || null}
+        title={previewDocState ? `Preview Dokumen: ${previewDocState.file.name}` : undefined}
+        driveUploadError={previewDocState?.file?.driveUploadError}
+        onClose={() => setPreviewDocState(null)}
+        onFileUpdated={(updated) => {
+          setPreviewDocState((prev) => (prev ? { ...prev, file: updated } : null));
+          if (updated.googleDriveUrl && previewDocState?.docId) {
+            void curriculumService
+              .updateDocument(previewDocState.docId, {
+                google_drive_url: updated.googleDriveUrl,
+              })
+              .then(() => {
+                void loadData();
+              })
+              .catch(() => {});
+          }
         }}
       />
     </div>

@@ -98,7 +98,9 @@ export const GoogleDriveStoragePage: React.FC = () => {
   } | null>(null);
 
   const isAdmin = activeRole === 'admin';
-  const isAppsScriptActive = fileStorageService.isAppsScriptActive(driveConfig);
+  const driveStatus = fileStorageService.getDriveStatusInfo(driveConfig);
+  const isAppsScriptActive = driveStatus.isHealthy;
+  const isAppsScriptError = driveStatus.isError;
 
   const loadRefs = useCallback(async () => {
     try {
@@ -355,55 +357,89 @@ export const GoogleDriveStoragePage: React.FC = () => {
     }
   };
 
-  const handleSaveConfig = (e: React.FormEvent) => {
+  const handleSaveConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdmin) return;
     const trimmedWebhook = (driveConfig.appsScriptWebhookUrl || '').trim();
     const hasScriptUrl = trimmedWebhook.startsWith('https://script.google.com');
-    const nextConfig = fileStorageService.saveConfig({
+    const draftConfig: DriveIntegrationConfig = {
       ...driveConfig,
       appsScriptWebhookUrl: trimmedWebhook,
       sharedFolderUrl: (driveConfig.sharedFolderUrl || '').trim(),
       ownerEmail: (driveConfig.ownerEmail || 'alihsansoborejo@gmail.com').trim(),
       autoUploadToDrive: hasScriptUrl ? driveConfig.autoUploadToDrive : false,
-      activatedBy: hasScriptUrl && driveConfig.autoUploadToDrive ? (user?.profile?.full_name || 'Admin Madrasah') : driveConfig.activatedBy,
-      activatedAt: hasScriptUrl && driveConfig.autoUploadToDrive ? new Date().toISOString() : driveConfig.activatedAt,
-    });
+      activatedBy:
+        hasScriptUrl && driveConfig.autoUploadToDrive
+          ? user?.profile?.full_name || 'Admin Madrasah'
+          : driveConfig.activatedBy,
+      activatedAt:
+        hasScriptUrl && driveConfig.autoUploadToDrive ? new Date().toISOString() : driveConfig.activatedAt,
+    };
+    const nextConfig = fileStorageService.saveConfig(draftConfig);
     setDriveConfig(nextConfig);
     setSavedConfigNotice(true);
     setTimeout(() => setSavedConfigNotice(false), 3500);
+
+    // Otomatis uji koneksi saat URL Apps Script disimpan agar status langsung akurat
+    if (hasScriptUrl && draftConfig.autoUploadToDrive !== false) {
+      await runTestAppsScript(nextConfig);
+    }
   };
 
-  const handleTestAppsScript = async () => {
-    if (!isAdmin) return;
+  const runTestAppsScript = async (configToTest: DriveIntegrationConfig) => {
     setIsTestingScript(true);
     setScriptTestResult(null);
     try {
-      const result = await fileStorageService.testAppsScriptConnection(driveConfig);
+      const result = await fileStorageService.testAppsScriptConnection(configToTest);
       setScriptTestResult(result);
       const updated = fileStorageService.saveConfig({
-        ...driveConfig,
-        ownerEmail: result.ownerEmail || driveConfig.ownerEmail || 'alihsansoborejo@gmail.com',
-        autoUploadToDrive: result.success ? true : driveConfig.autoUploadToDrive,
+        ...configToTest,
+        ownerEmail: result.ownerEmail || configToTest.ownerEmail || 'alihsansoborejo@gmail.com',
+        autoUploadToDrive: result.success ? true : configToTest.autoUploadToDrive,
         sharedFolderUrl:
-          result.success && (!driveConfig.sharedFolderUrl || driveConfig.sharedFolderUrl === 'https://drive.google.com') && result.folderUrl
+          result.success &&
+          (!configToTest.sharedFolderUrl || configToTest.sharedFolderUrl === 'https://drive.google.com') &&
+          result.folderUrl
             ? result.folderUrl
-            : driveConfig.sharedFolderUrl,
-        activatedBy: result.success ? (user?.profile?.full_name || 'Admin Madrasah') : driveConfig.activatedBy,
-        activatedAt: result.success ? new Date().toISOString() : driveConfig.activatedAt,
+            : configToTest.sharedFolderUrl,
+        activatedBy: result.success ? user?.profile?.full_name || 'Admin Madrasah' : configToTest.activatedBy,
+        activatedAt: result.success ? new Date().toISOString() : configToTest.activatedAt,
         lastTestAt: new Date().toISOString(),
         lastTestStatus: result.success ? 'connected' : 'error',
         lastTestMessage: result.message,
       });
       setDriveConfig(updated);
+
+      if (result.success) {
+        const pendingSync = await fileStorageService.syncPendingFilesToDrive();
+        if (pendingSync.synced > 0) {
+          setStatusMessage(
+            `Koneksi berhasil! ${pendingSync.synced} berkas arsip yang tertunda telah otomatis dikirim ke Google Drive.`
+          );
+          await loadStoredFiles();
+        }
+      }
     } catch (err: any) {
+      const errMsg = err?.message || 'Gagal menghubungi Google Apps Script.';
       setScriptTestResult({
         success: false,
-        message: err?.message || 'Gagal menghubungi Google Apps Script.',
+        message: errMsg,
       });
+      const updated = fileStorageService.saveConfig({
+        ...configToTest,
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'error',
+        lastTestMessage: errMsg,
+      });
+      setDriveConfig(updated);
     } finally {
       setIsTestingScript(false);
     }
+  };
+
+  const handleTestAppsScript = async () => {
+    if (!isAdmin) return;
+    await runTestAppsScript(driveConfig);
   };
 
   const handleConfirmDeleteFile = async () => {
@@ -451,6 +487,16 @@ export const GoogleDriveStoragePage: React.FC = () => {
                 Drive Aktif ({driveConfig.ownerEmail || 'alihsansoborejo@gmail.com'} · Tanpa Login)
               </span>
             </div>
+          ) : isAppsScriptError ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab('settings')}
+              className="flex items-center gap-2 px-3 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-300 rounded-lg text-xs text-rose-900 font-semibold cursor-pointer"
+              title={driveStatus.errorMessage || 'Periksa konfigurasi Apps Script'}
+            >
+              <span className="w-2 h-2 rounded-full bg-rose-500" />
+              <span>Koneksi Apps Script Bermasalah (Klik Perbaiki)</span>
+            </button>
           ) : isFirebaseDriveConnected ? (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900">
               <span className="w-2 h-2 rounded-full bg-emerald-500" />
@@ -565,28 +611,39 @@ export const GoogleDriveStoragePage: React.FC = () => {
         <div className="bg-white border border-emerald-200/80 rounded-b-xl p-6 shadow-xs space-y-6">
           <div
             className={`border rounded-xl p-4 flex items-start gap-3 ${
-              isAppsScriptActive || isFirebaseDriveConnected
+              isAppsScriptError
+                ? 'bg-rose-50/80 border-rose-300'
+                : isAppsScriptActive || isFirebaseDriveConnected
                 ? 'bg-emerald-50/70 border-emerald-200'
                 : 'bg-amber-50/80 border-amber-300'
             }`}
           >
             <ShieldCheck
               className={`w-5 h-5 shrink-0 mt-0.5 ${
-                isAppsScriptActive || isFirebaseDriveConnected ? 'text-emerald-800' : 'text-amber-700'
+                isAppsScriptError
+                  ? 'text-rose-700'
+                  : isAppsScriptActive || isFirebaseDriveConnected
+                  ? 'text-emerald-800'
+                  : 'text-amber-700'
               }`}
             />
             <div className="text-xs leading-relaxed">
               <p className="font-bold text-slate-900">
-                {isAppsScriptActive
+                {isAppsScriptError
+                  ? 'Koneksi Google Apps Script Gagal / Ditolak (Perlu Perbaikan Admin)'
+                  : isAppsScriptActive
                   ? `Google Drive Madrasah Aktif (${driveConfig.ownerEmail || 'alihsansoborejo@gmail.com'} · Tanpa Login)`
                   : isFirebaseDriveConnected
                   ? 'Google Drive Terhubung via Akun Google'
                   : 'Google Apps Script Drive Belum Diaktifkan Admin Madrasah'}
               </p>
               <p className="mt-0.5 text-slate-700">
-                {isAppsScriptActive
-                  ? `Seluruh guru dapat mengunggah berkas dari HP atau laptop mana pun tanpa login Google. Berkas otomatis tersusun rapi ke Google Drive ${driveConfig.ownerEmail || 'alihsansoborejo@gmail.com'}.`
-                  : 'Berkas tersimpan sementara di arsip aplikasi. Agar setiap berkas otomatis tersimpan ke Google Drive alihsansoborejo@gmail.com dari perangkat mana pun tanpa login, Admin Madrasah dapat menempelkan URL Web App pada tab Konfigurasi Google Apps Script.'}
+                {isAppsScriptError
+                  ? driveStatus.errorMessage ||
+                    'Google Apps Script mengembalikan HTTP 403 / halaman login. Pastikan skrip di-deploy memakai akun @gmail.com biasa (bukan @belajar.id) dengan Who has access = Anyone.'
+                  : isAppsScriptActive
+                  ? `Seluruh guru dapat mengunggah berkas dari HP atau laptop mana pun tanpa login Google. Berkas langsung terkirim ke Google Drive ${driveConfig.ownerEmail || 'alihsansoborejo@gmail.com'}.`
+                  : 'Berkas tersimpan sementara di arsip aplikasi. Agar setiap berkas otomatis terkirim ke Google Drive alihsansoborejo@gmail.com dari perangkat mana pun tanpa login, Admin Madrasah dapat menempelkan URL Web App pada tab Konfigurasi Google Apps Script.'}
               </p>
               <p className="mt-1.5 font-mono text-[10px] bg-white/80 px-2.5 py-1 rounded-md border border-emerald-200 text-emerald-900">
                 Susunan Folder Tujuan: {fullDriveFolderPreview}
@@ -840,9 +897,13 @@ export const GoogleDriveStoragePage: React.FC = () => {
                               <span className="truncate max-w-[260px]" title={file.name}>
                                 {file.name}
                               </span>
-                              {file.googleDriveUrl && (
+                              {isRealDriveFileUrl(file.googleDriveUrl) ? (
                                 <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[9px] font-bold text-emerald-800">
-                                  Drive Tersinkron
+                                  Terkirim ke Google Drive
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-[9px] font-bold text-amber-800">
+                                  Arsip Perangkat (Belum di Drive)
                                 </span>
                               )}
                             </div>
@@ -872,7 +933,7 @@ export const GoogleDriveStoragePage: React.FC = () => {
                       </td>
                       <td className="py-2.5 px-4 text-right">
                         <div className="inline-flex items-center gap-1.5">
-                          {/* Pratinjau */}
+                          {/* Pratinjau Full Window */}
                           <button
                             onClick={() =>
                               setPreviewModalState({
@@ -881,11 +942,11 @@ export const GoogleDriveStoragePage: React.FC = () => {
                                 driveUploadError: file.driveUploadError,
                               })
                             }
-                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-medium text-[11px] transition-colors cursor-pointer"
-                            title="Pratinjau Berkas"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded font-semibold text-[11px] transition-colors cursor-pointer"
+                            title="Preview Dokumen (Tampilan Layar Penuh)"
                           >
                             <Eye className="w-3 h-3" />
-                            <span>Lihat</span>
+                            <span>Preview Dokumen</span>
                           </button>
 
                           {/* Unduh Berkas Fisik */}
@@ -949,10 +1010,16 @@ export const GoogleDriveStoragePage: React.FC = () => {
                   className={`px-2.5 py-1 rounded-full text-[10px] font-bold shrink-0 border ${
                     isAppsScriptActive
                       ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : isAppsScriptError
+                      ? 'bg-rose-50 text-rose-800 border-rose-200'
                       : 'bg-amber-50 text-amber-800 border-amber-200'
                   }`}
                 >
-                  {isAppsScriptActive ? 'Apps Script Aktif' : 'Belum Diaktifkan'}
+                  {isAppsScriptActive
+                    ? 'Apps Script Aktif'
+                    : isAppsScriptError
+                    ? 'Apps Script Error (Cek Uji Koneksi)'
+                    : 'Belum Diaktifkan'}
                 </span>
               </div>
 
@@ -1179,7 +1246,8 @@ export const GoogleDriveStoragePage: React.FC = () => {
 
               <ol className="list-decimal pl-4 space-y-2 text-[11px] text-emerald-100/90 leading-relaxed">
                 <li>
-                  Masuk browser dengan akun Google <strong className="text-amber-300">alihsansoborejo@gmail.com</strong>, lalu buka{' '}
+                  Masuk browser dengan akun <strong className="text-amber-300">@gmail.com biasa</strong> (contoh:{' '}
+                  <strong className="text-amber-300">alihsansoborejo@gmail.com</strong> — <em>jangan memakai akun @belajar.id</em> karena Google Workspace pendidikan memblokir akses tanpa login), lalu buka{' '}
                   <a href="https://script.google.com" target="_blank" rel="noreferrer" className="text-amber-300 underline font-semibold">
                     script.google.com
                   </a>{' '}

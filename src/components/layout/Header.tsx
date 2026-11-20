@@ -55,8 +55,10 @@ export const Header: React.FC<HeaderProps> = React.memo(({ onToggleMobileNav, on
   }, []);
 
   const activeRoleConfig = ROLE_CONFIGS[activeRole];
-  const isAppsScriptActive = fileStorageService.isAppsScriptActive();
-  const isAnyDriveActive = isAppsScriptActive || isDriveConnected;
+  const driveStatus = fileStorageService.getDriveStatusInfo();
+  const isAppsScriptHealthy = driveStatus.isHealthy;
+  const isAppsScriptError = driveStatus.isError;
+  const isAnyDriveActive = isAppsScriptHealthy || isDriveConnected;
 
   const isCloudIssue = isSupabaseConfigured && (supabaseStatus === 'quota_exceeded' || supabaseStatus === 'error');
   const isHealthyConnected =
@@ -169,21 +171,41 @@ export const Header: React.FC<HeaderProps> = React.memo(({ onToggleMobileNav, on
           <button
             onClick={() => onNavigate('penyimpanan-drive')}
             className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
-              isAnyDriveActive
+              isAppsScriptError
+                ? 'bg-rose-50 text-rose-800 border-rose-300 hover:bg-rose-100'
+                : isAnyDriveActive
                 ? 'bg-amber-50 text-emerald-950 border-amber-300 hover:bg-amber-100'
                 : 'bg-white text-slate-600 border-slate-200 hover:bg-emerald-50/50'
             }`}
-            title="Buka Penyimpanan Google Drive (alihsansoborejo@gmail.com)"
+            title={
+              isAppsScriptError
+                ? `Koneksi Google Apps Script bermasalah: ${driveStatus.errorMessage || 'Klik untuk memperbaiki'}`
+                : `Buka Penyimpanan Google Drive (${driveStatus.ownerEmail})`
+            }
           >
-            <HardDrive className={`w-3.5 h-3.5 ${isAnyDriveActive ? 'text-amber-600' : 'text-slate-400'}`} />
-            <span className="truncate max-w-[160px]">
-              {isAppsScriptActive
+            <HardDrive
+              className={`w-3.5 h-3.5 ${
+                isAppsScriptError
+                  ? 'text-rose-600'
+                  : isAnyDriveActive
+                  ? 'text-amber-600'
+                  : 'text-slate-400'
+              }`}
+            />
+            <span className="truncate max-w-[165px]">
+              {isAppsScriptError
+                ? 'Drive Perlu Perbaikan'
+                : isAppsScriptHealthy
                 ? 'Drive Aktif (Tanpa Login)'
                 : isDriveConnected
                 ? (googleUser?.displayName || 'Drive Terhubung')
                 : 'Google Drive'}
             </span>
-            {isAnyDriveActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+            {isAppsScriptError ? (
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+            ) : (
+              isAnyDriveActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            )}
           </button>
         )}
 

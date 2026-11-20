@@ -107,7 +107,9 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
   const [modulList, setModulList] = useState<ModulAjarItem[]>([]);
   const [lkpdList, setLkpdList] = useState<LKPDItem[]>([]);
   const [uploadedDocs, setUploadedDocs] = useState<DocumentLink[]>([]);
-  const [docScopeFilter, setDocScopeFilter] = useState<'tab' | 'all'>('all');
+  const [storedFilesList, setStoredFilesList] = useState<StoredDocumentFile[]>([]);
+  const [docScopeFilter, setDocScopeFilter] = useState<'tab' | 'all' | 'everything'>('all');
+  const [driveAlert, setDriveAlert] = useState<string | null>(null);
 
   // Modal States
   const [showModal, setShowModal] = useState<boolean>(false);
@@ -172,7 +174,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
     void fileStorageService.hydrateConfigFromServer();
 
     try {
-      const [sbjs, clss, asgs, sys, years, sems, teacher, tchs, docs] = await Promise.all([
+      const [sbjs, clss, asgs, sys, years, sems, teacher, tchs, docs, allStoredFiles] = await Promise.all([
         academicService.getSubjects(),
         academicService.getClasses(),
         academicService.getTeachingAssignments(),
@@ -182,12 +184,14 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
         academicService.resolveTeacherForUser(user),
         academicService.getTeachers(),
         curriculumService.getDocuments(),
+        fileStorageService.getAllFiles(),
       ]);
 
       setAllSubjects(sbjs);
       setAllClasses(clss);
       setSettings(sys);
       setResolvedTeacher(teacher);
+      setStoredFilesList(allStoredFiles);
       const { candidateTeacherIds } = academicService.getMatchingTeacherIdsForUser(user, teacher, tchs);
       setUploadedDocs(
         activeRole === 'guru'
@@ -963,7 +967,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
       }
 
       const driveUploadStatus = uploadedViaAppsScript
-        ? ' & tersimpan ke Google Drive Madrasah (via Apps Script tanpa login)'
+        ? ' & langsung terkirim ke Google Drive Madrasah (tanpa login)'
         : uploadedViaOAuth
         ? ' & tersimpan ke Google Drive Madrasah'
         : uploadFile
@@ -973,9 +977,15 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
         (uploadFile || manualUrl) && submitToPrincipal
           ? ' dan dikirim ke Dashboard Kepala Madrasah untuk ditelaah'
           : '';
-      const warnSuffix = appsScriptWarn ? ` (Catatan Drive: ${appsScriptWarn})` : '';
+      if (appsScriptWarn) {
+        setDriveAlert(
+          `Berkas "${docTitle}" berhasil disimpan ke arsip aplikasi, namun sinkronisasi otomatis ke Google Drive gagal: ${appsScriptWarn}`
+        );
+      } else if (uploadedViaAppsScript || uploadedViaOAuth) {
+        setDriveAlert(null);
+      }
 
-      notify(`${docMeta.shortLabel} "${docTitle}" berhasil disimpan${driveUploadStatus}${kamadSuffix}.${warnSuffix}`);
+      notify(`${docMeta.shortLabel} "${docTitle}" berhasil disimpan${driveUploadStatus}${kamadSuffix}.`);
       const uploadedTab = activeTab;
       setShowModal(false);
       setEditId(null);
@@ -1074,6 +1084,22 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
             <span>{notification}</span>
           </div>
           <button onClick={() => setNotification(null)} className="text-white hover:text-amber-200">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Peringatan Koneksi Google Drive jika Apps Script bermasalah */}
+      {driveAlert && (
+        <div className="p-3.5 rounded-xl bg-rose-50 text-rose-900 text-xs flex items-start justify-between gap-3 border border-rose-300 shadow-xs">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold">Perlu Perhatian: Pengiriman Otomatis ke Google Drive Terhambat</p>
+              <p className="mt-0.5 text-rose-800">{driveAlert}</p>
+            </div>
+          </div>
+          <button onClick={() => setDriveAlert(null)} className="text-rose-500 hover:text-rose-800 shrink-0">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -1419,7 +1445,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {cp.file_id && (
@@ -1544,7 +1570,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               title="Pratinjau Berkas"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {tp.file_id && (
@@ -1672,7 +1698,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {atp.file_id && (
@@ -1788,7 +1814,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {prota.file_id && (
@@ -1919,7 +1945,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {promes.file_id && (
@@ -2051,7 +2077,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {modul.file_id && (
@@ -2184,7 +2210,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Pratinjau</span>
+                              <span>Preview Dokumen</span>
                             </button>
                           )}
                           {lkpd.file_id && (
@@ -2250,13 +2276,41 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
           ========================================================================= */}
       {(() => {
         const currentClassObj = allClasses.find((c) => c.level === selectedClass);
-        const matchingUploadedDocs = uploadedDocs.filter((d) => {
-          const subjectMatch = !selectedSubject || d.subject_id === selectedSubject;
+        const storedById = new Map<string, StoredDocumentFile>(storedFilesList.map((f) => [f.id, f]));
+        const linkedFileIds = new Set(uploadedDocs.map((d) => d.file_id).filter(Boolean) as string[]);
+
+        // Gabungkan dokumen kurikulum + berkas fisik yang belum tertaut ke document_link saat filter "everything"
+        const orphanStoredRows: DocumentLink[] = storedFilesList
+          .filter((f) => !linkedFileIds.has(f.id))
+          .map((f) => ({
+            id: `stored-${f.id}`,
+            teacher_id: user?.teacherId || user?.id || '',
+            academic_year_id: activeYearId,
+            semester_id: activeSemesterId,
+            class_id: currentClassObj?.id || '',
+            subject_id: selectedSubject || '',
+            document_type: f.category || 'Dokumen Perangkat',
+            title: f.name,
+            google_drive_url: f.googleDriveUrl || '',
+            file_id: f.id,
+            status: 'Draft',
+            submission_date: null,
+            created_at: f.uploadedAt,
+            updated_at: f.uploadedAt,
+          }));
+
+        const baseDocs =
+          docScopeFilter === 'everything' ? [...uploadedDocs, ...orphanStoredRows] : uploadedDocs;
+
+        const matchingUploadedDocs = baseDocs.filter((d) => {
+          const isEverything = docScopeFilter === 'everything';
+          const subjectMatch = isEverything || !selectedSubject || d.subject_id === selectedSubject;
           const docClassLevel =
             d.class?.level || allClasses.find((c) => c.id === d.class_id)?.level;
-          const classMatch = !docClassLevel || docClassLevel === selectedClass || d.class_id === currentClassObj?.id;
+          const classMatch =
+            isEverything || !docClassLevel || docClassLevel === selectedClass || d.class_id === currentClassObj?.id;
           const typeMatch =
-            docScopeFilter === 'all' || d.document_type === DOC_META_BY_TAB[activeTab].docType;
+            docScopeFilter !== 'tab' || d.document_type === DOC_META_BY_TAB[activeTab].docType;
           const q = searchTerm.trim().toLowerCase();
           const searchMatch =
             !q ||
@@ -2271,10 +2325,12 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
               <div>
                 <h3 className="font-bold text-sm text-emerald-950 flex items-center gap-2">
                   <HardDrive className="w-4 h-4 text-emerald-700" />
-                  <span>Daftar Berkas Terunggah (Google Drive &amp; Arsip Madrasah)</span>
+                  <span>Daftar Berkas Terunggah (Daftar Perangkat &amp; Google Drive)</span>
                 </h3>
                 <p className="text-xs text-emerald-800/80 mt-0.5">
-                  Seluruh berkas perangkat pembelajaran yang telah diunggah untuk {currentSubjectName} · Kelas {selectedClass}.
+                  {docScopeFilter === 'everything'
+                    ? 'Menampilkan seluruh berkas perangkat pembelajaran yang pernah diunggah.'
+                    : `Seluruh berkas perangkat pembelajaran terunggah untuk ${currentSubjectName} · Kelas ${selectedClass}.`}
                 </p>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -2288,7 +2344,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                         : 'text-slate-600 hover:bg-emerald-50'
                     }`}
                   >
-                    Semua Perangkat
+                    Mapel &amp; Kelas Ini
                   </button>
                   <button
                     type="button"
@@ -2300,6 +2356,17 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                     }`}
                   >
                     Khusus {DOC_META_BY_TAB[activeTab].shortLabel}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDocScopeFilter('everything')}
+                    className={`px-2.5 py-1 rounded font-semibold transition-colors cursor-pointer ${
+                      docScopeFilter === 'everything'
+                        ? 'bg-emerald-700 text-white'
+                        : 'text-slate-600 hover:bg-emerald-50'
+                    }`}
+                  >
+                    Semua Berkas
                   </button>
                 </div>
                 <span className="text-xs font-semibold px-2.5 py-1 rounded bg-white text-emerald-800 border border-emerald-200">
@@ -2314,10 +2381,10 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                   <tr>
                     <th className="px-4 py-3 w-10 text-center">No</th>
                     <th className="px-4 py-3">Judul / Nama Berkas</th>
-                    <th className="px-4 py-3 w-48">Jenis Perangkat</th>
+                    <th className="px-4 py-3 w-48">Jenis &amp; Sinkronisasi Drive</th>
                     <th className="px-4 py-3 w-36">Tanggal Unggah</th>
                     <th className="px-4 py-3 w-28 text-center">Status Telaah</th>
-                    <th className="px-4 py-3 text-right w-56">Aksi Berkas</th>
+                    <th className="px-4 py-3 text-right w-64">Aksi Berkas</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -2328,116 +2395,144 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
                       </td>
                     </tr>
                   ) : (
-                    matchingUploadedDocs.map((doc, idx) => (
-                      <tr key={doc.id} className="hover:bg-emerald-50/30 transition-colors">
-                        <td className="px-4 py-3 text-center font-mono text-slate-400 font-semibold">
-                          {idx + 1}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <FileText className="w-4 h-4 text-amber-600 shrink-0" />
-                            <div className="min-w-0">
-                              <div className="font-bold text-slate-900 truncate max-w-xs" title={doc.title}>
-                                {doc.title}
-                              </div>
-                              <div className="text-[11px] text-slate-500">
-                                {doc.class?.name || `Kelas ${selectedClass}`} · {doc.subject?.name || currentSubjectName}
+                    matchingUploadedDocs.map((doc, idx) => {
+                      const storedMeta = doc.file_id ? storedById.get(doc.file_id) : undefined;
+                      const effectiveDriveUrl =
+                        (isRealDriveFileUrl(doc.google_drive_url) ? doc.google_drive_url : '') ||
+                        (isRealDriveFileUrl(storedMeta?.googleDriveUrl) ? storedMeta?.googleDriveUrl : '') ||
+                        '';
+                      const isSyncedDrive = isRealDriveFileUrl(effectiveDriveUrl);
+                      const isOrphanRow = doc.id.startsWith('stored-');
+
+                      return (
+                        <tr key={doc.id} className="hover:bg-emerald-50/30 transition-colors">
+                          <td className="px-4 py-3 text-center font-mono text-slate-400 font-semibold">
+                            {idx + 1}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <FileText className="w-4 h-4 text-amber-600 shrink-0" />
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-900 truncate max-w-xs" title={doc.title}>
+                                  {doc.title}
+                                </div>
+                                <div className="text-[11px] text-slate-500">
+                                  {doc.class?.name || allClasses.find((c) => c.id === doc.class_id)?.name || `Kelas ${selectedClass}`} ·{' '}
+                                  {doc.subject?.name || allSubjects.find((s) => s.id === doc.subject_id)?.name || currentSubjectName}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-900 border border-emerald-200 font-semibold text-[11px]">
-                            {doc.document_type}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-[11px] text-slate-500">
-                          {doc.created_at
-                            ? new Date(doc.created_at).toLocaleDateString('id-ID', {
-                                day: '2-digit',
-                                month: 'short',
-                                year: 'numeric',
-                              })
-                            : '-'}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <span
-                            className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
-                              doc.status === 'Disetujui'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : doc.status === 'Diajukan'
-                                ? 'bg-amber-100 text-amber-900'
-                                : doc.status === 'Perlu Revisi'
-                                ? 'bg-rose-100 text-rose-800'
-                                : 'bg-slate-100 text-slate-700'
-                            }`}
-                          >
-                            {doc.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
-                            {(doc.file_id || isRealDriveFileUrl(doc.google_drive_url)) && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void handlePreviewFile(
-                                    doc.file_id || undefined,
-                                    doc.title,
-                                    doc.google_drive_url,
-                                    activeTab,
-                                    undefined
-                                  )
-                                }
-                                className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
-                              >
-                                <Eye className="w-3 h-3" />
-                                <span>Pratinjau</span>
-                              </button>
-                            )}
-                            {doc.file_id && (
-                              <button
-                                type="button"
-                                onClick={() => void handleDownloadFile(doc.file_id || undefined)}
-                                className="px-2 py-1 rounded bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-800 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
-                                title="Unduh Berkas"
-                              >
-                                <Download className="w-3 h-3" />
-                              </button>
-                            )}
-                            {isRealDriveFileUrl(doc.google_drive_url) && (
-                              <a
-                                href={doc.google_drive_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold text-[11px] inline-flex items-center gap-1"
-                              >
-                                <FolderSync className="w-3 h-3" />
-                                <span>Drive</span>
-                                <ExternalLink className="w-2.5 h-2.5" />
-                              </a>
-                            )}
-                            {(activeRole === 'admin' || doc.status === 'Draft' || doc.status === 'Perlu Revisi') && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setPendingDelete({
-                                    tab: 'archive-doc',
-                                    id: doc.id,
-                                    label: doc.title,
-                                    fileId: doc.file_id,
-                                  })
-                                }
-                                className="p-1 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
-                                title="Hapus Berkas"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))
+                          </td>
+                          <td className="px-4 py-3 space-y-1">
+                            <div>
+                              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-900 border border-emerald-200 font-semibold text-[11px]">
+                                {doc.document_type}
+                              </span>
+                            </div>
+                            <div>
+                              {isSyncedDrive ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  <span>Terkirim ke Google Drive</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                  <AlertCircle className="w-3 h-3" />
+                                  <span>Arsip Lokal (Belum di Drive)</span>
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-[11px] text-slate-500">
+                            {doc.created_at
+                              ? new Date(doc.created_at).toLocaleDateString('id-ID', {
+                                  day: '2-digit',
+                                  month: 'short',
+                                  year: 'numeric',
+                                })
+                              : '-'}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                                doc.status === 'Disetujui'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : doc.status === 'Diajukan'
+                                  ? 'bg-amber-100 text-amber-900'
+                                  : doc.status === 'Perlu Revisi'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {doc.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
+                              {(doc.file_id || isSyncedDrive) && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void handlePreviewFile(
+                                      doc.file_id || undefined,
+                                      doc.title,
+                                      effectiveDriveUrl || undefined,
+                                      activeTab,
+                                      undefined
+                                    )
+                                  }
+                                  className="px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="Preview Dokumen (Tampilan Layar Penuh)"
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  <span>Preview Dokumen</span>
+                                </button>
+                              )}
+                              {doc.file_id && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDownloadFile(doc.file_id || undefined)}
+                                  className="px-2 py-1 rounded bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-800 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                                  title="Unduh Berkas"
+                                >
+                                  <Download className="w-3 h-3" />
+                                </button>
+                              )}
+                              {isSyncedDrive && (
+                                <a
+                                  href={effectiveDriveUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold text-[11px] inline-flex items-center gap-1"
+                                >
+                                  <FolderSync className="w-3 h-3" />
+                                  <span>Drive</span>
+                                  <ExternalLink className="w-2.5 h-2.5" />
+                                </a>
+                              )}
+                              {!isOrphanRow &&
+                                (activeRole === 'admin' || doc.status === 'Draft' || doc.status === 'Perlu Revisi') && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setPendingDelete({
+                                        tab: 'archive-doc',
+                                        id: doc.id,
+                                        label: doc.title,
+                                        fileId: doc.file_id,
+                                      })
+                                    }
+                                    className="p-1 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
+                                    title="Hapus Berkas"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -2464,7 +2559,9 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
             {/* Status Google Drive Madrasah (Tanpa Login via Apps Script) */}
             {(() => {
               const driveCfg = fileStorageService.getConfig();
-              const isAppsScriptReady = fileStorageService.isAppsScriptActive(driveCfg);
+              const driveStatus = fileStorageService.getDriveStatusInfo(driveCfg);
+              const isAppsScriptReady = driveStatus.isHealthy;
+              const isAppsScriptError = driveStatus.isError;
               const classObjPreview = allClasses.find((c) => c.level === selectedClass);
               const folderPreview = fileStorageService.buildStructuredDrivePath({
                 academicYearName: activeYearName,
@@ -2478,28 +2575,39 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
               return (
                 <div
                   className={`p-3 rounded-xl border text-[11px] flex items-start gap-2.5 ${
-                    isAppsScriptReady || isOAuthDriveConnected
+                    isAppsScriptError
+                      ? 'bg-rose-50 border-rose-200 text-rose-950'
+                      : isAppsScriptReady || isOAuthDriveConnected
                       ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
                       : 'bg-amber-50 border-amber-200 text-amber-950'
                   }`}
                 >
                   <HardDrive
                     className={`w-4 h-4 shrink-0 mt-0.5 ${
-                      isAppsScriptReady || isOAuthDriveConnected ? 'text-emerald-700' : 'text-amber-700'
+                      isAppsScriptError
+                        ? 'text-rose-700'
+                        : isAppsScriptReady || isOAuthDriveConnected
+                        ? 'text-emerald-700'
+                        : 'text-amber-700'
                     }`}
                   />
                   <div>
                     <p className="font-bold">
-                      {isAppsScriptReady
+                      {isAppsScriptError
+                        ? 'Koneksi Google Apps Script Perlu Perbaikan'
+                        : isAppsScriptReady
                         ? `Google Drive Aktif (Apps Script Tanpa Login · ${driveCfg.ownerEmail || 'alihsansoborejo@gmail.com'})`
                         : isOAuthDriveConnected
                         ? `Google Drive Terhubung (${googleUser?.email || 'Akun Google'})`
                         : 'Google Apps Script Drive Belum Diaktifkan Admin Madrasah'}
                     </p>
                     <p className="mt-0.5 opacity-90">
-                      {isAppsScriptReady
-                        ? `Berkas otomatis diunggah ke Google Drive ${driveCfg.ownerEmail || 'alihsansoborejo@gmail.com'} dari perangkat mana pun tanpa perlu login.`
-                        : `Berkas tetap tersimpan ke arsip aplikasi & dapat dikirim ke Kepala Madrasah. Admin dapat mengaktifkan Google Apps Script di menu Penyimpanan Google Drive agar langsung tersimpan ke ${driveCfg.ownerEmail || 'alihsansoborejo@gmail.com'}.`}
+                      {isAppsScriptError
+                        ? driveStatus.errorMessage ||
+                          'Web App Google Apps Script gagal diakses. Berkas tetap tersimpan di daftar arsip aplikasi hingga Admin memperbaiki URL Apps Script.'
+                        : isAppsScriptReady
+                        ? `Berkas langsung dikirim ke Google Drive ${driveCfg.ownerEmail || 'alihsansoborejo@gmail.com'} dari perangkat mana pun tanpa perlu login.`
+                        : `Berkas tetap tersimpan ke arsip aplikasi & dapat dikirim ke Kepala Madrasah. Admin dapat mengaktifkan Google Apps Script di menu Penyimpanan Google Drive agar langsung terkirim ke ${driveCfg.ownerEmail || 'alihsansoborejo@gmail.com'}.`}
                     </p>
                     <p className="mt-1 font-mono text-[10px] bg-white/75 px-2 py-1 rounded border border-emerald-200/80 text-emerald-900">
                       Folder tujuan: {fullFolderPreview}

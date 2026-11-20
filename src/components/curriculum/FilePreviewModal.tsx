@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   StoredDocumentFile,
   extractDriveFileIdFromUrl,
@@ -60,10 +60,11 @@ export const FilePreviewContent: React.FC<FilePreviewBodyProps> = ({
   fullWindow = false,
 }) => {
   const [currentFile, setCurrentFile] = useState<StoredDocumentFile>(file);
-  const [isRetryingDrive, setIsRetryingDrive] = useState(false);
+  const [isAutoSyncingDrive, setIsAutoSyncingDrive] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(driveUploadError || file.driveUploadError || null);
   const [retrySuccessMsg, setRetrySuccessMsg] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const autoTriedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setCurrentFile(file);
@@ -137,26 +138,49 @@ export const FilePreviewContent: React.FC<FilePreviewBodyProps> = ({
     }
   }, [isText, currentFile.dataUrl]);
 
-  const handleRetryDrive = async () => {
-    setIsRetryingDrive(true);
-    setRetryError(null);
-    setRetrySuccessMsg(null);
-    try {
-      const { updated } = await fileStorageService.retryDriveUpload(currentFile);
-      setCurrentFile(updated);
-      setRetrySuccessMsg(
-        `Berhasil dikirim ke Google Drive (${updated.folderPath || 'Folder SIMPEL'})!`
-      );
-      onFileUpdated?.(updated);
-    } catch (err: any) {
-      setRetryError(err?.message || 'Gagal mengunggah ulang berkas ke Google Drive.');
-    } finally {
-      setIsRetryingDrive(false);
-    }
-  };
-
   const driveConfig = fileStorageService.getConfig();
-  const isAppsScriptActive = fileStorageService.isAppsScriptActive(driveConfig);
+  const driveStatus = fileStorageService.getDriveStatusInfo(driveConfig);
+
+  // Kirim otomatis ke Google Drive saat pratinjau dibuka bila berkas belum punya tautan Drive dan Apps Script sehat (tanpa tombol manual)
+  useEffect(() => {
+    if (
+      hasRealDriveLink ||
+      !currentFile.dataUrl ||
+      driveUploadError ||
+      currentFile.driveUploadError ||
+      !driveStatus.isHealthy ||
+      autoTriedIdsRef.current.has(currentFile.id)
+    ) {
+      return;
+    }
+
+    autoTriedIdsRef.current.add(currentFile.id);
+    let cancelled = false;
+    setIsAutoSyncingDrive(true);
+    setRetryError(null);
+
+    void fileStorageService
+      .retryDriveUpload(currentFile)
+      .then(({ updated }) => {
+        if (cancelled) return;
+        setCurrentFile(updated);
+        setRetrySuccessMsg(
+          `Otomatis terkirim ke Google Drive (${updated.folderPath || 'Folder SIMPEL'})!`
+        );
+        onFileUpdated?.(updated);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setRetryError(err?.message || 'Sinkronisasi otomatis ke Google Drive gagal.');
+      })
+      .finally(() => {
+        if (!cancelled) setIsAutoSyncingDrive(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentFile, hasRealDriveLink, driveUploadError, driveStatus.isHealthy, onFileUpdated]);
   const previewFrameHeight = fullWindow
     ? 'flex-1 min-h-0 h-full'
     : compact
@@ -212,37 +236,55 @@ export const FilePreviewContent: React.FC<FilePreviewBodyProps> = ({
             )}
           </div>
         </div>
+      ) : isAutoSyncingDrive ? (
+        <div
+          className={`${
+            fullWindow ? 'shrink-0 ' : ''
+          }p-3 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center gap-2.5`}
+        >
+          <RefreshCw className="w-4 h-4 text-emerald-700 shrink-0 animate-spin" />
+          <div className="text-xs">
+            <p className="font-bold text-emerald-950">Mengirim otomatis ke Google Drive Madrasah...</p>
+            <p className="text-[11px] text-emerald-800">
+              Dokumen sedang disinkronkan langsung ke {driveStatus.ownerEmail} tanpa login.
+            </p>
+          </div>
+        </div>
       ) : (
         <div
           className={`${
             fullWindow ? 'shrink-0 ' : ''
-          }p-3 rounded-xl bg-amber-50 border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5`}
+          }p-3 rounded-xl ${
+            retryError || driveStatus.isError
+              ? 'bg-rose-50 border border-rose-200'
+              : 'bg-amber-50 border border-amber-300'
+          } flex items-start gap-2.5`}
         >
-          <div className="flex items-start gap-2.5 min-w-0">
-            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <div className="text-xs">
-              <p className="font-bold text-amber-950">
-                Berkas tersimpan di arsip aplikasi, belum tersinkron ke Google Drive
-              </p>
-              <p className="text-[11px] text-amber-900 mt-0.5">
-                {retryError ||
-                  (isAppsScriptActive
-                    ? 'Klik tombol "Kirim ke Google Drive" untuk menyinkronkan berkas ini ke Drive madrasah.'
-                    : 'Admin Madrasah perlu mengaktifkan URL Web App Google Apps Script di menu Penyimpanan Google Drive.')}
-              </p>
-            </div>
-          </div>
-          {isAppsScriptActive && currentFile.dataUrl && (
-            <button
-              type="button"
-              onClick={() => void handleRetryDrive()}
-              disabled={isRetryingDrive}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-500 text-emerald-950 text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-60"
+          <AlertCircle
+            className={`w-4 h-4 shrink-0 mt-0.5 ${
+              retryError || driveStatus.isError ? 'text-rose-700' : 'text-amber-700'
+            }`}
+          />
+          <div className="text-xs min-w-0">
+            <p
+              className={`font-bold ${
+                retryError || driveStatus.isError ? 'text-rose-950' : 'text-amber-950'
+              }`}
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRetryingDrive ? 'animate-spin' : ''}`} />
-              <span>{isRetryingDrive ? 'Mengirim...' : 'Kirim ke Google Drive'}</span>
-            </button>
-          )}
+              {retryError || driveStatus.isError
+                ? 'Dokumen tersimpan di perangkat/arsip aplikasi, namun pengiriman otomatis ke Google Drive gagal'
+                : 'Berkas tersimpan di arsip aplikasi, Google Drive Madrasah belum terhubung'}
+            </p>
+            <p
+              className={`text-[11px] mt-0.5 ${
+                retryError || driveStatus.isError ? 'text-rose-900' : 'text-amber-900'
+              }`}
+            >
+              {retryError ||
+                driveStatus.errorMessage ||
+                'Admin Madrasah perlu mengaktifkan & menguji URL Web App Google Apps Script (dari akun @gmail.com, akses "Anyone") di menu Penyimpanan Google Drive agar setiap unggahan otomatis terkirim ke Drive tanpa login.'}
+            </p>
+          </div>
         </div>
       )}
 

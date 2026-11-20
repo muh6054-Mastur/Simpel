@@ -858,10 +858,10 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
                           <button
                             type="button"
                             onClick={() => void handlePreviewItem(item)}
-                            className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            className="px-2.5 py-1 rounded bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                           >
                             <Eye className="w-3 h-3" />
-                            <span>Pratinjau</span>
+                            <span>Preview Dokumen</span>
                           </button>
                         )}
                         {item.file_id && (
@@ -956,7 +956,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
 
             {(() => {
               const driveCfg = fileStorageService.getConfig();
-              const isAppsScriptReady = fileStorageService.isAppsScriptActive(driveCfg);
+              const driveStatus = fileStorageService.getDriveStatusInfo(driveCfg);
               const classLabel =
                 formClassLevel === 0
                   ? 'Lintas Kelas (Semua Rombel)'
@@ -972,24 +972,37 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
               return (
                 <div
                   className={`p-3 rounded-xl border text-[11px] flex items-start gap-2.5 ${
-                    isAppsScriptReady || isOAuthDriveConnected
+                    driveStatus.isError
+                      ? 'bg-rose-50 border-rose-200 text-rose-950'
+                      : driveStatus.isHealthy || isOAuthDriveConnected
                       ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
                       : 'bg-amber-50 border-amber-200 text-amber-950'
                   }`}
                 >
                   <HardDrive
                     className={`w-4 h-4 shrink-0 mt-0.5 ${
-                      isAppsScriptReady || isOAuthDriveConnected ? 'text-emerald-700' : 'text-amber-700'
+                      driveStatus.isError
+                        ? 'text-rose-700'
+                        : driveStatus.isHealthy || isOAuthDriveConnected
+                        ? 'text-emerald-700'
+                        : 'text-amber-700'
                     }`}
                   />
                   <div>
                     <p className="font-bold">
-                      {isAppsScriptReady
-                        ? `Google Drive Aktif (Apps Script Tanpa Login · ${driveCfg.ownerEmail || 'alihsansoborejo@gmail.com'})`
+                      {driveStatus.isError
+                        ? `Google Drive Apps Script Bermasalah (${driveStatus.ownerEmail})`
+                        : driveStatus.isHealthy
+                        ? `Google Drive Aktif (Apps Script Tanpa Login · ${driveStatus.ownerEmail})`
                         : isOAuthDriveConnected
                         ? `Google Drive Terhubung (${googleUser?.email || 'Akun Google'})`
                         : 'Simpan ke Arsip Aplikasi & Tautan Drive'}
                     </p>
+                    {driveStatus.isError && driveStatus.errorMessage && (
+                      <p className="text-[10px] text-rose-800 mt-0.5 leading-relaxed">
+                        {driveStatus.errorMessage}
+                      </p>
+                    )}
                     <p className="mt-1 font-mono text-[10px] bg-white/75 px-2 py-1 rounded border border-emerald-200/80 text-emerald-900">
                       Folder tujuan: {driveCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo'} / {folderPreview.displayPath}
                     </p>

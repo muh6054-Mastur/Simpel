@@ -308,11 +308,11 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
                         <button
                           type="button"
                           onClick={() => handleOpenFileAction(doc.fileId, 'preview')}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                          title="Pratinjau isi dokumen"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors"
+                          title="Preview dokumen layar penuh"
                         >
                           <Eye className="w-3 h-3" />
-                          <span>Pratinjau</span>
+                          <span>Preview Dokumen</span>
                         </button>
                         <button
                           type="button"
@@ -427,10 +427,10 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
                   <button
                     type="button"
                     onClick={() => handleOpenFileAction(reviewDoc.fileId, 'preview')}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 text-slate-700 font-semibold text-[11px] hover:bg-slate-100"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-800 text-white font-bold text-[11px] hover:bg-emerald-900"
                   >
                     <Eye className="w-3 h-3" />
-                    <span>Pratinjau Berkas</span>
+                    <span>Preview Dokumen</span>
                   </button>
                 )}
                 <a

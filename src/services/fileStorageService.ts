@@ -282,12 +282,22 @@ async function postDirectlyToAppsScript(
     const { data, rawText, isEmptyOrNonJson } = await readJsonResponseSafely(res);
     if (isEmptyOrNonJson) {
       if (
+        res.status === 401 ||
+        res.status === 403 ||
         rawText.startsWith('<') ||
         rawText.toLowerCase().includes('<!doctype html') ||
-        rawText.toLowerCase().includes('accounts.google.com')
+        rawText.toLowerCase().includes('accounts.google.com') ||
+        rawText.toLowerCase().includes('access denied')
       ) {
+        const isForbidden =
+          res.status === 401 ||
+          res.status === 403 ||
+          rawText.toLowerCase().includes('access denied') ||
+          rawText.toLowerCase().includes('you need access');
         throw new Error(
-          'Web App Google Apps Script mengembalikan halaman HTML/login Google. Pastikan saat Deploy > New deployment di script.google.com, Execute as disetel ke "Me (alihsansoborejo@gmail.com)" dan Who has access disetel ke "Anyone" (Siapa saja).'
+          isForbidden
+            ? 'Google Apps Script menolak akses tanpa login (HTTP 403 / Access Denied). Akun Google Workspace pendidikan (*.belajar.id) biasanya memblokir akses publik ("Anyone"). Solusi: Deploy ulang skrip memakai akun @gmail.com biasa (mis. alihsansoborejo@gmail.com) dengan Execute as = "Me" dan Who has access = "Anyone" (Siapa saja).'
+            : 'Web App Google Apps Script mengembalikan halaman HTML/login Google. Pastikan saat Deploy > New deployment di script.google.com memakai akun @gmail.com biasa, Execute as disetel ke "Me" dan Who has access disetel ke "Anyone" (Siapa saja).'
         );
       }
       throw new Error(
@@ -425,11 +435,39 @@ export const fileStorageService = {
     return updated;
   },
 
-  // Cek apakah Google Apps Script aktif (tanpa login Google)
+  // Cek apakah Google Apps Script terkonfigurasi (tanpa login Google)
   isAppsScriptActive(configOverride?: DriveIntegrationConfig): boolean {
     const cfg = configOverride || this.getConfig();
     const url = (cfg.appsScriptWebhookUrl || '').trim();
     return Boolean(url.startsWith('https://script.google.com') && cfg.autoUploadToDrive !== false);
+  },
+
+  // Status lengkap integrasi Google Drive (membedakan sehat vs error HTTP 403 / konfigurasi bermasalah)
+  getDriveStatusInfo(configOverride?: DriveIntegrationConfig): {
+    hasWebhookUrl: boolean;
+    autoEnabled: boolean;
+    isConfigured: boolean;
+    isError: boolean;
+    isHealthy: boolean;
+    ownerEmail: string;
+    errorMessage?: string;
+  } {
+    const cfg = configOverride || this.getConfig();
+    const url = (cfg.appsScriptWebhookUrl || '').trim();
+    const hasWebhookUrl = url.startsWith('https://script.google.com');
+    const autoEnabled = cfg.autoUploadToDrive !== false;
+    const isConfigured = hasWebhookUrl && autoEnabled;
+    const isError = isConfigured && cfg.lastTestStatus === 'error';
+    const isHealthy = isConfigured && cfg.lastTestStatus !== 'error';
+    return {
+      hasWebhookUrl,
+      autoEnabled,
+      isConfigured,
+      isError,
+      isHealthy,
+      ownerEmail: cfg.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
+      errorMessage: isError ? cfg.lastTestMessage : undefined,
+    };
   },
 
   // Uji Koneksi Web App Google Apps Script melalui proxy server
@@ -530,9 +568,21 @@ export const fileStorageService = {
           if (uploadResult.folderUrl) driveFolderUrl = uploadResult.folderUrl;
           if (uploadResult.folderPath) driveFolderPath = uploadResult.folderPath;
           uploadedViaAppsScript = true;
+          if (config.lastTestStatus !== 'connected') {
+            this.saveConfig({
+              lastTestAt: new Date().toISOString(),
+              lastTestStatus: 'connected',
+              lastTestMessage: 'Upload otomatis ke Google Drive berhasil tanpa login.',
+            });
+          }
         }
       } catch (err: any) {
         driveUploadError = err?.message || 'Upload ke Google Drive via Apps Script gagal.';
+        this.saveConfig({
+          lastTestAt: new Date().toISOString(),
+          lastTestStatus: 'error',
+          lastTestMessage: driveUploadError,
+        });
         console.warn('Upload via Google Apps Script gagal:', err);
       }
     }
@@ -551,6 +601,8 @@ export const fileStorageService = {
       driveFileId: driveFileId || undefined,
       folderPath: driveFolderPath || undefined,
       folderUrl: driveFolderUrl || undefined,
+      driveUploadError,
+      uploadedViaAppsScript,
     };
 
     const savedRecord = await new Promise<StoredDocumentFile>((resolve, reject) => {
@@ -665,6 +717,36 @@ export const fileStorageService = {
     }
 
     return { updated: updatedRecord };
+  },
+
+  /**
+   * Sinkronkan otomatis semua berkas lokal yang belum memiliki tautan Google Drive
+   * (dipanggil saat Admin mengaktifkan / menguji koneksi Apps Script hingga berhasil)
+   */
+  async syncPendingFilesToDrive(): Promise<{ synced: number; failed: number }> {
+    const config = await this.hydrateConfigFromServer();
+    const status = this.getDriveStatusInfo(config);
+    if (!status.isHealthy) {
+      return { synced: 0, failed: 0 };
+    }
+
+    const allFiles = await this.getAllFiles();
+    const pending = allFiles.filter((f) => !isRealDriveFileUrl(f.googleDriveUrl) && Boolean(f.dataUrl));
+    let synced = 0;
+    let failed = 0;
+
+    for (const file of pending) {
+      try {
+        const res = await this.retryDriveUpload(file);
+        if (isRealDriveFileUrl(res.updated.googleDriveUrl)) {
+          synced += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+
+    return { synced, failed };
   },
 
   /**
