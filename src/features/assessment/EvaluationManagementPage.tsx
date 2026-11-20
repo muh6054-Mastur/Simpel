@@ -399,7 +399,11 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     activeSemesterType
   );
   const currentScopeConfig =
-    availableScopes.find((s) => s.scope_key === selectedScope) || availableScopes[0];
+    availableScopes.find((s) => s.scope_key === selectedScope) ||
+    ((activeTab === 'asesmen-nilai' || activeTab === 'remedial-pengayaan')
+      ? presetTemplates.find((s) => s.scope_key === selectedScope)
+      : undefined) ||
+    availableScopes[0];
   const effectiveScope = currentScopeConfig?.scope_key || '';
 
   // Filter butir kisi-kisi per Mapel, Kelas, dan Lingkup Materi / STS / SAS

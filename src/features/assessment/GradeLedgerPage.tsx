@@ -65,7 +65,12 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [editingDescStudentId, setEditingDescStudentId] = useState<string | null>(null);
+  const [rawScores, setRawScores] = useState<Record<string, string>>({});
   const isLedgerDirtyRef = useRef<boolean>(false);
+  const isSavingRef = useRef<boolean>(false);
+  const loadSeqRef = useRef<number>(0);
+  const rawScoresRef = useRef(rawScores);
+  rawScoresRef.current = rawScores;
 
   const isTeacherRole = activeRole === 'guru';
   const isHomeroomRole = activeRole === 'wali_kelas';
@@ -170,16 +175,23 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   };
 
   const loadLedgerData = async (silent = false) => {
+    if (silent && isSavingRef.current) {
+      return;
+    }
+    const reqId = ++loadSeqRef.current;
+
     if (!selectedClassId || (viewMode === 'per-mapel' && !selectedSubjectId)) {
       setSubjectScores([]);
       setOverallRows([]);
       setOverallSubjects([]);
+      setRawScores({});
       setIsLoading(false);
       return;
     }
 
     if (!silent) {
       setIsLoading(true);
+      setRawScores({});
     }
     try {
       setIsLocked(reportService.isReportCardLocked(selectedClassId));
@@ -187,10 +199,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       if (viewMode === 'per-mapel') {
         if (!silent || !isLedgerDirtyRef.current) {
           const scores = await reportService.getSubjectLedger(selectedClassId, selectedSubjectId);
+          if (reqId !== loadSeqRef.current || isSavingRef.current || (silent && isLedgerDirtyRef.current)) {
+            return;
+          }
           setSubjectScores(scores);
         }
       } else {
         const { subjects: sbjs, rows } = await reportService.getClassOverallLedger(selectedClassId);
+        if (reqId !== loadSeqRef.current || isSavingRef.current) {
+          return;
+        }
         setOverallSubjects(sbjs);
         setOverallRows(rows);
       }
@@ -228,6 +246,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   useEffect(() => {
     isLedgerDirtyRef.current = false;
+    setRawScores({});
     if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
       void loadLedgerData(false);
     } else {
@@ -257,8 +276,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       'simpel_semesters',
     ],
     () => {
+      if (isSavingRef.current) return;
       void loadBaseData().then(() => {
-        if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
+        if (!isSavingRef.current && selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
           void loadLedgerData(true);
         }
       });
@@ -329,6 +349,38 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         };
       })
     );
+  };
+
+  const handleRawLedgerScoreChange = (
+    studentId: string,
+    field: 'lm1' | 'lm2' | 'lm3' | 'lm4' | 'stsScore' | 'sasScore',
+    raw: string
+  ) => {
+    if (isLocked) return;
+    const key = `${studentId}_${field}`;
+    setRawScores((prev) => ({
+      ...prev,
+      [key]: raw,
+    }));
+    if (raw.trim() === '') {
+      handleScoreChange(studentId, field, 0);
+      return;
+    }
+    const parsed = Number(raw);
+    handleScoreChange(studentId, field, Number.isNaN(parsed) ? 0 : Math.min(100, Math.max(0, parsed)));
+  };
+
+  const handleLedgerScoreBlur = (
+    studentId: string,
+    field: 'lm1' | 'lm2' | 'lm3' | 'lm4' | 'stsScore' | 'sasScore'
+  ) => {
+    const key = `${studentId}_${field}`;
+    setRawScores((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const handleCustomDescChange = (
@@ -429,10 +481,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   // Simpan Perubahan Leger
   const handleSaveLedger = async () => {
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+    loadSeqRef.current++;
     setIsSaving(true);
     try {
       await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, subjectScores, true);
       isLedgerDirtyRef.current = false;
+      setRawScores({});
       notifyDomFormSaved();
       setStatusMessage('Data nilai leger mata pelajaran berhasil disimpan dan siap masuk ke Buku Rapor.');
       setTimeout(() => setStatusMessage(null), 3500);
@@ -440,6 +496,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       console.error('Gagal menyimpan leger:', err);
       setStatusMessage('Gagal menyimpan perubahan leger nilai.');
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
     }
   };
@@ -1036,10 +1093,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           min="0"
                           max="100"
                           disabled={isLocked}
-                          value={row.lmScores.lm1}
-                          onChange={(e) =>
-                            handleScoreChange(row.studentId, 'lm1', Number(e.target.value))
+                          value={
+                            rawScores[`${row.studentId}_lm1`] !== undefined
+                              ? rawScores[`${row.studentId}_lm1`]
+                              : String(row.lmScores.lm1)
                           }
+                          onChange={(e) =>
+                            handleRawLedgerScoreChange(row.studentId, 'lm1', e.target.value)
+                          }
+                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm1')}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1051,10 +1114,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           min="0"
                           max="100"
                           disabled={isLocked}
-                          value={row.lmScores.lm2}
-                          onChange={(e) =>
-                            handleScoreChange(row.studentId, 'lm2', Number(e.target.value))
+                          value={
+                            rawScores[`${row.studentId}_lm2`] !== undefined
+                              ? rawScores[`${row.studentId}_lm2`]
+                              : String(row.lmScores.lm2)
                           }
+                          onChange={(e) =>
+                            handleRawLedgerScoreChange(row.studentId, 'lm2', e.target.value)
+                          }
+                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm2')}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1066,10 +1135,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           min="0"
                           max="100"
                           disabled={isLocked}
-                          value={row.lmScores.lm3}
-                          onChange={(e) =>
-                            handleScoreChange(row.studentId, 'lm3', Number(e.target.value))
+                          value={
+                            rawScores[`${row.studentId}_lm3`] !== undefined
+                              ? rawScores[`${row.studentId}_lm3`]
+                              : String(row.lmScores.lm3)
                           }
+                          onChange={(e) =>
+                            handleRawLedgerScoreChange(row.studentId, 'lm3', e.target.value)
+                          }
+                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm3')}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1081,10 +1156,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           min="0"
                           max="100"
                           disabled={isLocked}
-                          value={row.lmScores.lm4}
-                          onChange={(e) =>
-                            handleScoreChange(row.studentId, 'lm4', Number(e.target.value))
+                          value={
+                            rawScores[`${row.studentId}_lm4`] !== undefined
+                              ? rawScores[`${row.studentId}_lm4`]
+                              : String(row.lmScores.lm4)
                           }
+                          onChange={(e) =>
+                            handleRawLedgerScoreChange(row.studentId, 'lm4', e.target.value)
+                          }
+                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm4')}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1101,10 +1182,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           min="0"
                           max="100"
                           disabled={isLocked}
-                          value={row.stsScore}
-                          onChange={(e) =>
-                            handleScoreChange(row.studentId, 'stsScore', Number(e.target.value))
+                          value={
+                            rawScores[`${row.studentId}_stsScore`] !== undefined
+                              ? rawScores[`${row.studentId}_stsScore`]
+                              : String(row.stsScore)
                           }
+                          onChange={(e) =>
+                            handleRawLedgerScoreChange(row.studentId, 'stsScore', e.target.value)
+                          }
+                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'stsScore')}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1116,10 +1203,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           min="0"
                           max="100"
                           disabled={isLocked}
-                          value={row.sasScore}
-                          onChange={(e) =>
-                            handleScoreChange(row.studentId, 'sasScore', Number(e.target.value))
+                          value={
+                            rawScores[`${row.studentId}_sasScore`] !== undefined
+                              ? rawScores[`${row.studentId}_sasScore`]
+                              : String(row.sasScore)
                           }
+                          onChange={(e) =>
+                            handleRawLedgerScoreChange(row.studentId, 'sasScore', e.target.value)
+                          }
+                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'sasScore')}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>

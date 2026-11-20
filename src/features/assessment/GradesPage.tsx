@@ -116,6 +116,11 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   rawScoresRef.current = rawScores;
   const selectedAssessmentIdRef = useRef<string>(selectedAssessmentId);
   selectedAssessmentIdRef.current = selectedAssessmentId;
+  const activeScopeTabRef = useRef<string>(activeScopeTab);
+  activeScopeTabRef.current = activeScopeTab;
+  const typeFilterRef = useRef<string>(typeFilter);
+  typeFilterRef.current = typeFilter;
+  const lastPropScopeKeyRef = useRef<string>(scopeContext?.scopeKey || '');
   const showFormModalRef = useRef<boolean>(showFormModal);
   showFormModalRef.current = showFormModal;
 
@@ -128,6 +133,15 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     setTimeout(() => setStatusMessage(null), 4500);
   };
 
+  // Helper resolusi scope key untuk sebuah asesmen (LM1..LM4, STS, SAS, atau __unscoped__)
+  const getAssessmentEffectiveScopeKey = useCallback((a: Assessment): string => {
+    const raw = String(a.scope_key || '').trim();
+    if (raw) return raw;
+    if (a.assessment_type === 'Sumatif_Tengah_Semester') return 'STS';
+    if (a.assessment_type === 'Sumatif_Akhir_Semester') return 'SAS';
+    return '__unscoped__';
+  }, []);
+
   useEffect(() => {
     if (scopeContext?.subjectId) {
       setOnlyActiveContext(true);
@@ -135,8 +149,23 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   }, [scopeContext?.subjectId, scopeContext?.classId]);
 
   useEffect(() => {
-    if (scopeContext?.scopeKey) {
-      setActiveScopeTab(scopeContext.scopeKey);
+    const nextScope = scopeContext?.scopeKey || '';
+    if (nextScope && nextScope !== lastPropScopeKeyRef.current) {
+      lastPropScopeKeyRef.current = nextScope;
+      activeScopeTabRef.current = nextScope;
+      setActiveScopeTab(nextScope);
+      if (
+        typeFilterRef.current !== 'all' &&
+        ((nextScope === 'STS' && typeFilterRef.current !== 'Sumatif_Tengah_Semester') ||
+          (nextScope === 'SAS' && typeFilterRef.current !== 'Sumatif_Akhir_Semester') ||
+          (nextScope !== 'STS' &&
+            nextScope !== 'SAS' &&
+            (typeFilterRef.current === 'Sumatif_Tengah_Semester' ||
+              typeFilterRef.current === 'Sumatif_Akhir_Semester')))
+      ) {
+        typeFilterRef.current = 'all';
+        setTypeFilter('all');
+      }
     }
   }, [scopeContext?.scopeKey]);
 
@@ -257,19 +286,31 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       });
 
       const candidatePool = onlyActiveContext && effectiveSubjectId ? matchingContextAsms : scopedAsms;
+      const currentScopeTab = activeScopeTabRef.current;
+      const currentTypeFilter = typeFilterRef.current;
+      const filteredPool = candidatePool.filter((a) => {
+        if (currentScopeTab !== 'all' && getAssessmentEffectiveScopeKey(a) !== currentScopeTab) {
+          return false;
+        }
+        if (currentTypeFilter !== 'all' && a.assessment_type !== currentTypeFilter) {
+          return false;
+        }
+        return true;
+      });
       const currentSelectedId = selectedAssessmentIdRef.current;
 
-      if (candidatePool.length > 0) {
+      if (filteredPool.length > 0) {
         const targetAsm =
-          candidatePool.find((a) => a.id === currentSelectedId) ||
-          (scopeContext?.scopeKey
-            ? candidatePool.find((a) => a.scope_key === scopeContext.scopeKey)
+          filteredPool.find((a) => a.id === currentSelectedId) ||
+          (scopeContext?.scopeKey && currentScopeTab === scopeContext.scopeKey
+            ? filteredPool.find((a) => getAssessmentEffectiveScopeKey(a) === scopeContext.scopeKey)
             : undefined) ||
-          candidatePool[0];
+          filteredPool[0];
         const isSwitchingAssessment = targetAsm.id !== currentSelectedId;
         if (isSwitchingAssessment) {
           dirtyStudentIdsRef.current.clear();
           setRawScores({});
+          selectedAssessmentIdRef.current = targetAsm.id;
           setSelectedAssessmentId(targetAsm.id);
         }
 
@@ -301,6 +342,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       } else {
         dirtyStudentIdsRef.current.clear();
         setRawScores({});
+        selectedAssessmentIdRef.current = '';
         setSelectedAssessmentId('');
         setGrades([]);
         setScoreInputs({});
@@ -324,6 +366,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     scopeContext?.scopeKey,
     onlyActiveContext,
     buildScoreInputsForAssessment,
+    getAssessmentEffectiveScopeKey,
   ]);
 
   useEffect(() => {
@@ -349,15 +392,6 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       }
     }
   );
-
-  // Helper resolusi scope key untuk sebuah asesmen (LM1..LM4, STS, SAS, atau __unscoped__)
-  const getAssessmentEffectiveScopeKey = useCallback((a: Assessment): string => {
-    const raw = String(a.scope_key || '').trim();
-    if (raw) return raw;
-    if (a.assessment_type === 'Sumatif_Tengah_Semester') return 'STS';
-    if (a.assessment_type === 'Sumatif_Akhir_Semester') return 'SAS';
-    return '__unscoped__';
-  }, []);
 
   // Daftar asesmen sesuai konteks mapel/kelas (sebelum filter tab Lingkup Materi & jenis)
   const contextAssessments = useMemo(() => {
@@ -460,65 +494,175 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     });
   }, [contextAssessments, activeScopeTab, typeFilter, getAssessmentEffectiveScopeKey]);
 
-  const handleSelectAssessment = useCallback(async (asmId: string) => {
-    const reqId = ++loadSeqRef.current;
-    dirtyStudentIdsRef.current.clear();
-    setRawScores({});
-    setSelectedAssessmentId(asmId);
-    const asm = assessments.find((a) => a.id === asmId);
-    const linked = asm?.assignment || assignments.find((a) => a.id === asm?.assignment_id);
-    if (linked) {
-      setWorkspaceSelection({
-        assignmentId: linked.id,
-        subjectId: linked.subject_id,
-        classId: linked.class_id,
-        classLevel: linked.class?.level || null,
-      });
-    }
-    try {
-      const grds = await assessmentService.getGrades(asmId);
-      if (reqId !== loadSeqRef.current || selectedAssessmentIdRef.current !== asmId) {
-        return;
-      }
-      setGrades(grds);
-      const freshMap = buildScoreInputsForAssessment(
-        asm,
-        grds,
-        assignments,
-        students,
-        classMembers,
-        Number(settings?.kktp_default || 75)
-      );
-      setScoreInputs((prev) => {
-        if (dirtyStudentIdsRef.current.size === 0) {
-          return freshMap;
-        }
-        const merged = { ...freshMap };
-        dirtyStudentIdsRef.current.forEach((studentId) => {
-          if (prev[studentId]) {
-            merged[studentId] = prev[studentId];
+  const handleSelectAssessment = useCallback(
+    async (asmId: string, asmOverride?: Assessment) => {
+      const reqId = ++loadSeqRef.current;
+      dirtyStudentIdsRef.current.clear();
+      setRawScores({});
+      selectedAssessmentIdRef.current = asmId;
+      setSelectedAssessmentId(asmId);
+
+      let asm = asmOverride || assessments.find((a) => a.id === asmId);
+      if (!asm) {
+        try {
+          const freshAsms = await assessmentService.getAssessments();
+          if (reqId !== loadSeqRef.current || selectedAssessmentIdRef.current !== asmId) {
+            return;
           }
+          asm = freshAsms.find((a) => a.id === asmId);
+        } catch {
+          // ignore
+        }
+      }
+
+      const linked = asm?.assignment || assignments.find((a) => a.id === asm?.assignment_id);
+      if (linked) {
+        setWorkspaceSelection({
+          assignmentId: linked.id,
+          subjectId: linked.subject_id,
+          classId: linked.class_id,
+          classLevel: linked.class?.level || null,
         });
-        return merged;
-      });
-    } catch (err) {
-      console.error('Gagal memilih asesmen:', err);
-    }
-  }, [assessments, assignments, students, classMembers, settings?.kktp_default, buildScoreInputsForAssessment, setWorkspaceSelection]);
+      }
+      try {
+        const grds = await assessmentService.getGrades(asmId);
+        if (reqId !== loadSeqRef.current || selectedAssessmentIdRef.current !== asmId) {
+          return;
+        }
+        setGrades(grds);
+        const freshMap = buildScoreInputsForAssessment(
+          asm,
+          grds,
+          assignments,
+          students,
+          classMembers,
+          Number(settings?.kktp_default || 75)
+        );
+        setScoreInputs((prev) => {
+          if (dirtyStudentIdsRef.current.size === 0) {
+            return freshMap;
+          }
+          const merged = { ...freshMap };
+          dirtyStudentIdsRef.current.forEach((studentId) => {
+            if (prev[studentId]) {
+              merged[studentId] = prev[studentId];
+            }
+          });
+          return merged;
+        });
+      } catch (err) {
+        console.error('Gagal memilih asesmen:', err);
+      }
+    },
+    [
+      assessments,
+      assignments,
+      students,
+      classMembers,
+      settings?.kktp_default,
+      buildScoreInputsForAssessment,
+      setWorkspaceSelection,
+    ]
+  );
 
   const handleSelectScopeTab = (tabKey: string) => {
+    activeScopeTabRef.current = tabKey;
     setActiveScopeTab(tabKey);
     if (tabKey !== 'all' && tabKey !== '__unscoped__') {
+      lastPropScopeKeyRef.current = tabKey;
       onScopeChange?.(tabKey);
     }
+
+    let nextTypeFilter = typeFilterRef.current;
+    const hasMatchWithCurrentType = contextAssessments.some(
+      (a) =>
+        (tabKey === 'all' || getAssessmentEffectiveScopeKey(a) === tabKey) &&
+        (nextTypeFilter === 'all' || a.assessment_type === nextTypeFilter)
+    );
+    const hasMatchAnyType = contextAssessments.some(
+      (a) => tabKey === 'all' || getAssessmentEffectiveScopeKey(a) === tabKey
+    );
+    const isTypeIncompatibleWithTab =
+      (tabKey === 'STS' &&
+        nextTypeFilter !== 'all' &&
+        nextTypeFilter !== 'Sumatif_Tengah_Semester') ||
+      (tabKey === 'SAS' &&
+        nextTypeFilter !== 'all' &&
+        nextTypeFilter !== 'Sumatif_Akhir_Semester') ||
+      (tabKey !== 'all' &&
+        tabKey !== 'STS' &&
+        tabKey !== 'SAS' &&
+        (nextTypeFilter === 'Sumatif_Tengah_Semester' ||
+          nextTypeFilter === 'Sumatif_Akhir_Semester'));
+
+    if ((!hasMatchWithCurrentType && hasMatchAnyType) || isTypeIncompatibleWithTab) {
+      nextTypeFilter = 'all';
+      typeFilterRef.current = 'all';
+      setTypeFilter('all');
+    }
+
     const matching = contextAssessments.filter((a) => {
       const matchesScope = tabKey === 'all' || getAssessmentEffectiveScopeKey(a) === tabKey;
-      const matchesType = typeFilter === 'all' || a.assessment_type === typeFilter;
+      const matchesType = nextTypeFilter === 'all' || a.assessment_type === nextTypeFilter;
       return matchesScope && matchesType;
     });
-    if (matching.length > 0 && !matching.some((m) => m.id === selectedAssessmentId)) {
-      void handleSelectAssessment(matching[0].id);
-    } else if (matching.length === 0) {
+
+    if (matching.length > 0) {
+      if (!matching.some((m) => m.id === selectedAssessmentIdRef.current)) {
+        void handleSelectAssessment(matching[0].id, matching[0]);
+      }
+    } else {
+      loadSeqRef.current++;
+      dirtyStudentIdsRef.current.clear();
+      setRawScores({});
+      selectedAssessmentIdRef.current = '';
+      setSelectedAssessmentId('');
+      setGrades([]);
+      setScoreInputs({});
+    }
+  };
+
+  const handleTypeFilterChange = (nextType: string) => {
+    typeFilterRef.current = nextType;
+    setTypeFilter(nextType);
+
+    let nextScopeTab = activeScopeTabRef.current;
+    if (nextType === 'Sumatif_Tengah_Semester') {
+      nextScopeTab = 'STS';
+    } else if (nextType === 'Sumatif_Akhir_Semester') {
+      nextScopeTab = 'SAS';
+    } else if (
+      (nextType === 'Formatif' || nextType === 'Sumatif_Lingkup_Materi') &&
+      (nextScopeTab === 'STS' || nextScopeTab === 'SAS')
+    ) {
+      nextScopeTab = 'all';
+    }
+
+    if (nextScopeTab !== activeScopeTabRef.current) {
+      activeScopeTabRef.current = nextScopeTab;
+      setActiveScopeTab(nextScopeTab);
+      if (nextScopeTab !== 'all' && nextScopeTab !== '__unscoped__') {
+        lastPropScopeKeyRef.current = nextScopeTab;
+        onScopeChange?.(nextScopeTab);
+      }
+    }
+
+    const matching = contextAssessments.filter((a) => {
+      const matchesScope =
+        nextScopeTab === 'all' || getAssessmentEffectiveScopeKey(a) === nextScopeTab;
+      const matchesType = nextType === 'all' || a.assessment_type === nextType;
+      return matchesScope && matchesType;
+    });
+
+    if (matching.length > 0) {
+      if (!matching.some((m) => m.id === selectedAssessmentIdRef.current)) {
+        void handleSelectAssessment(matching[0].id, matching[0]);
+      }
+    } else {
+      loadSeqRef.current++;
+      dirtyStudentIdsRef.current.clear();
+      setRawScores({});
+      selectedAssessmentIdRef.current = '';
       setSelectedAssessmentId('');
       setGrades([]);
       setScoreInputs({});
@@ -654,11 +798,25 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         kktp: Number(settings?.kktp_default || 75),
         scope_key: effectiveUnitKey || null,
       });
-      if (effectiveUnitKey) {
-        setActiveScopeTab(effectiveUnitKey);
+      const resolvedScope = getAssessmentEffectiveScopeKey(created);
+      const nextScopeTab = resolvedScope !== '__unscoped__' ? resolvedScope : 'all';
+      activeScopeTabRef.current = nextScopeTab;
+      setActiveScopeTab(nextScopeTab);
+      if (nextScopeTab !== 'all') {
+        lastPropScopeKeyRef.current = nextScopeTab;
+        onScopeChange?.(nextScopeTab);
       }
-      await loadData();
-      await handleSelectAssessment(created.id);
+      if (typeFilterRef.current !== 'all' && typeFilterRef.current !== created.assessment_type) {
+        typeFilterRef.current = 'all';
+        setTypeFilter('all');
+      }
+      dirtyStudentIdsRef.current.clear();
+      setRawScores({});
+      selectedAssessmentIdRef.current = created.id;
+      setSelectedAssessmentId(created.id);
+      setAssessments((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
+      await loadData(false);
+      await handleSelectAssessment(created.id, created);
       showToast(`Daftar isian nilai "${title}" siap diisi (tanpa perlu kisi-kisi/soal).`, 'success');
     } catch (err) {
       console.error('Gagal membuat daftar nilai cepat:', err);
@@ -673,19 +831,50 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       return;
     }
 
+    const normalizedScopeKey =
+      formType === 'Sumatif_Tengah_Semester'
+        ? 'STS'
+        : formType === 'Sumatif_Akhir_Semester'
+        ? 'SAS'
+        : formScopeKey === 'STS' || formScopeKey === 'SAS'
+        ? activeScopeForCreate && activeScopeForCreate !== 'STS' && activeScopeForCreate !== 'SAS'
+          ? activeScopeForCreate
+          : 'LM1'
+        : formScopeKey ||
+          (activeScopeForCreate && activeScopeForCreate !== 'STS' && activeScopeForCreate !== 'SAS'
+            ? activeScopeForCreate
+            : '') ||
+          null;
+
     try {
       if (editingAssessmentId) {
-        await assessmentService.updateAssessment(editingAssessmentId, {
+        const updated = await assessmentService.updateAssessment(editingAssessmentId, {
           assignment_id: formAssignmentId,
           title: formTitle,
           assessment_type: formType,
           assessment_date: formDate,
           kktp: formKktp,
-          scope_key: formScopeKey || null,
+          scope_key: normalizedScopeKey,
         });
         setShowFormModal(false);
-        await loadData();
-        await handleSelectAssessment(editingAssessmentId);
+        if (updated) {
+          const resolvedScope = getAssessmentEffectiveScopeKey(updated);
+          const nextScopeTab = resolvedScope !== '__unscoped__' ? resolvedScope : 'all';
+          activeScopeTabRef.current = nextScopeTab;
+          setActiveScopeTab(nextScopeTab);
+          if (nextScopeTab !== 'all') {
+            lastPropScopeKeyRef.current = nextScopeTab;
+            onScopeChange?.(nextScopeTab);
+          }
+        }
+        if (typeFilterRef.current !== 'all' && typeFilterRef.current !== formType) {
+          typeFilterRef.current = 'all';
+          setTypeFilter('all');
+        }
+        selectedAssessmentIdRef.current = editingAssessmentId;
+        setSelectedAssessmentId(editingAssessmentId);
+        await loadData(false);
+        await handleSelectAssessment(editingAssessmentId, updated || undefined);
         showToast(`Daftar nilai "${formTitle}" berhasil diperbarui.`, 'success');
       } else {
         const created = await assessmentService.createAssessment({
@@ -694,12 +883,29 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
           assessment_type: formType,
           assessment_date: formDate,
           kktp: formKktp,
-          scope_key: formScopeKey || scopeContext?.scopeKey || null,
+          scope_key: normalizedScopeKey,
         });
         setShowFormModal(false);
         setFormTitle('');
-        await loadData();
-        await handleSelectAssessment(created.id);
+        const resolvedScope = getAssessmentEffectiveScopeKey(created);
+        const nextScopeTab = resolvedScope !== '__unscoped__' ? resolvedScope : 'all';
+        activeScopeTabRef.current = nextScopeTab;
+        setActiveScopeTab(nextScopeTab);
+        if (nextScopeTab !== 'all') {
+          lastPropScopeKeyRef.current = nextScopeTab;
+          onScopeChange?.(nextScopeTab);
+        }
+        if (typeFilterRef.current !== 'all' && typeFilterRef.current !== created.assessment_type) {
+          typeFilterRef.current = 'all';
+          setTypeFilter('all');
+        }
+        dirtyStudentIdsRef.current.clear();
+        setRawScores({});
+        selectedAssessmentIdRef.current = created.id;
+        setSelectedAssessmentId(created.id);
+        setAssessments((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
+        await loadData(false);
+        await handleSelectAssessment(created.id, created);
         showToast(`Daftar nilai "${created.title}" berhasil dibuat dan siap diisi.`, 'success');
       }
     } catch (err) {
@@ -772,7 +978,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   const currentAsm =
     visibleAssessments.find((a) => a.id === selectedAssessmentId) ||
-    assessments.find((a) => a.id === selectedAssessmentId);
+    (activeScopeTab === 'all' && typeFilter === 'all'
+      ? assessments.find((a) => a.id === selectedAssessmentId)
+      : undefined);
   const currentKktp = currentAsm ? Number(currentAsm.kktp) : Number(settings?.kktp_default || 75);
   const displayedStudents = getStudentsForAssessment(currentAsm, assignments, students, classMembers);
 
@@ -1247,7 +1455,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
                 <button
                   key={item.value}
                   type="button"
-                  onClick={() => setTypeFilter(item.value)}
+                  onClick={() => handleTypeFilterChange(item.value)}
                   className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all whitespace-nowrap cursor-pointer ${
                     isSelected
                       ? 'bg-white text-emerald-900 font-bold shadow-2xs border border-emerald-200'
@@ -1501,9 +1709,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
                               type="button"
                               onClick={() =>
                                 handleQuickCreateOffline(
-                                  scopeContext?.scopeKey === 'STS'
+                                  activeScopeForCreate === 'STS'
                                     ? 'Sumatif_Tengah_Semester'
-                                    : scopeContext?.scopeKey === 'SAS'
+                                    : activeScopeForCreate === 'SAS'
                                     ? 'Sumatif_Akhir_Semester'
                                     : 'Sumatif_Lingkup_Materi'
                                 )
@@ -1512,7 +1720,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
                             >
                               <Plus className="w-3.5 h-3.5 text-amber-300" />
                               <span>
-                                Buat Daftar Nilai Sumatif {scopeContext?.scopeCode || 'Materi'}
+                                Buat Daftar Nilai Sumatif {activeScopeCodeForCreate || 'Materi'}
                               </span>
                             </button>
                           </>
@@ -1687,8 +1895,19 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
                       type="button"
                       onClick={() => {
                         setFormType(opt.value);
-                        if (opt.value === 'Sumatif_Tengah_Semester') setFormScopeKey('STS');
-                        else if (opt.value === 'Sumatif_Akhir_Semester') setFormScopeKey('SAS');
+                        if (opt.value === 'Sumatif_Tengah_Semester') {
+                          setFormScopeKey('STS');
+                        } else if (opt.value === 'Sumatif_Akhir_Semester') {
+                          setFormScopeKey('SAS');
+                        } else if (formScopeKey === 'STS' || formScopeKey === 'SAS') {
+                          const fallbackLm =
+                            activeScopeForCreate &&
+                            activeScopeForCreate !== 'STS' &&
+                            activeScopeForCreate !== 'SAS'
+                              ? activeScopeForCreate
+                              : 'LM1';
+                          setFormScopeKey(fallbackLm);
+                        }
                       }}
                       className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border text-left transition-colors cursor-pointer ${
                         formType === opt.value
@@ -1722,7 +1941,21 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
                     <button
                       key={sc.scope_key}
                       type="button"
-                      onClick={() => setFormScopeKey(sc.scope_key)}
+                      onClick={() => {
+                        setFormScopeKey(sc.scope_key);
+                        if (sc.scope_key === 'STS' && formType !== 'Formatif') {
+                          setFormType('Sumatif_Tengah_Semester');
+                        } else if (sc.scope_key === 'SAS' && formType !== 'Formatif') {
+                          setFormType('Sumatif_Akhir_Semester');
+                        } else if (
+                          sc.scope_key !== 'STS' &&
+                          sc.scope_key !== 'SAS' &&
+                          (formType === 'Sumatif_Tengah_Semester' ||
+                            formType === 'Sumatif_Akhir_Semester')
+                        ) {
+                          setFormType('Sumatif_Lingkup_Materi');
+                        }
+                      }}
                       title={sc.title}
                       className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
                         formScopeKey === sc.scope_key
