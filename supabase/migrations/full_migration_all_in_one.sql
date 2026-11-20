@@ -1145,6 +1145,8 @@ RETURNS TRIGGER AS $$
 DECLARE
     v_is_locked BOOLEAN := FALSE;
     v_report_locked BOOLEAN := FALSE;
+    v_student_id UUID := COALESCE(NEW.student_id, OLD.student_id);
+    v_assessment_id UUID := COALESCE(NEW.assessment_id, OLD.assessment_id);
 BEGIN
     SELECT is_report_card_locked INTO v_report_locked FROM public.system_settings LIMIT 1;
     IF v_report_locked = TRUE AND NOT public.is_admin() THEN
@@ -1153,13 +1155,16 @@ BEGIN
 
     SELECT fg.is_locked INTO v_is_locked
     FROM public.assessments a
-    JOIN public.final_grades fg ON fg.assignment_id = a.assignment_id AND fg.student_id = NEW.student_id
-    WHERE a.id = NEW.assessment_id;
+    JOIN public.final_grades fg ON fg.assignment_id = a.assignment_id AND fg.student_id = v_student_id
+    WHERE a.id = v_assessment_id;
 
     IF v_is_locked = TRUE AND NOT public.is_admin() THEN
         RAISE EXCEPTION 'Akses ditolak: Nilai untuk siswa ini pada mata pelajaran tersebut telah disahkan dan dikunci.';
     END IF;
 
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
