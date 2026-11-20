@@ -10,11 +10,24 @@ import { AuthUser } from '../types/auth.types';
 import { Profile, UserRole } from '../types/database.types';
 import { DEMO_USERS } from '../lib/demoData';
 import { getDemoUsers, sortRolesByPriority } from './userService';
-import { academicService } from './academicService';
+import { academicService, invalidateAcademicCache } from './academicService';
+import { invalidateAssessmentCache } from './assessmentService';
+import { invalidateReportCache } from './reportService';
 import { syncService } from './syncService';
 
 const LOCAL_SESSION_KEY = 'simpel_mi_session_user';
 let lastSupabaseAuthError: string | null = null;
+const ACCOUNT_CACHE_TTL_MS = 10_000;
+const accountFetchInflight = new Map<string, Promise<AuthUser>>();
+let lastFetchedAccount: { userId: string; user: AuthUser; expiresAt: number } | null = null;
+
+export function clearAllRuntimeCaches(): void {
+  lastFetchedAccount = null;
+  accountFetchInflight.clear();
+  invalidateAcademicCache();
+  invalidateAssessmentCache();
+  invalidateReportCache();
+}
 
 export function getLastSupabaseAuthError(): string | null {
   return lastSupabaseAuthError;
@@ -54,8 +67,9 @@ export async function signInSupabaseStrict(email: string, password: string): Pro
     throw new Error('Sesi Supabase Auth tidak terbentuk.');
   }
   lastSupabaseAuthError = null;
-  const fullUser = await fetchFullUserAccount(authData.user.id, normalizedInput);
-  void syncService.syncAllLocalToCloud();
+  clearAllRuntimeCaches();
+  const fullUser = await fetchFullUserAccount(authData.user.id, normalizedInput, true);
+  void syncService.flushMutations();
   return fullUser;
 }
 
@@ -105,8 +119,9 @@ export async function loginWithEmail(email: string, password?: string): Promise<
 
       if (!authError && authData?.user) {
         try {
-          const fullUser = await fetchFullUserAccount(authData.user.id, normalizedInput);
-          void syncService.syncAllLocalToCloud();
+          clearAllRuntimeCaches();
+          const fullUser = await fetchFullUserAccount(authData.user.id, normalizedInput, true);
+          void syncService.flushMutations();
           return fullUser;
         } catch (profileErr) {
           if (!matchedUser) throw profileErr;
@@ -357,7 +372,8 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
       });
       reportSupabaseOutcome(authError);
       if (!authError && authData?.user) {
-        return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase());
+        clearAllRuntimeCaches();
+        return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase(), true);
       }
       if (authError) {
         lastSupabaseAuthError = authError.message;
@@ -410,179 +426,187 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
   return authUser;
 }
 
-export async function fetchFullUserAccount(userId: string, emailFallback?: string): Promise<AuthUser> {
-  // 1. Ambil data profil
-  let { data: profileData, error: profileError } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .maybeSingle();
-
-  const isPermissionDenied =
-    profileError?.code === '42501' ||
-    Boolean(profileError?.message && /permission denied/i.test(profileError.message));
-
-  if (isPermissionDenied) {
-    throw new Error(
-      'Izin akses tabel PostgreSQL (GRANT) di proyek Supabase baru belum aktif (42501 permission denied). Salin & jalankan ulang Skrip SQL Lengkap terbaru (atau skrip GRANT) di Supabase SQL Editor.'
-    );
+export async function fetchFullUserAccount(
+  userId: string,
+  emailFallback?: string,
+  force = false
+): Promise<AuthUser> {
+  if (!force && lastFetchedAccount && lastFetchedAccount.userId === userId && Date.now() < lastFetchedAccount.expiresAt) {
+    return lastFetchedAccount.user;
+  }
+  const existingInflight = accountFetchInflight.get(userId);
+  if (existingInflight) {
+    return existingInflight;
   }
 
-  const isMissingTableError =
-    profileError?.code === '42P01' ||
-    profileError?.code === 'PGRST205' ||
-    Boolean(profileError?.message && /does not exist|schema cache/i.test(profileError.message));
+  const task = (async (): Promise<AuthUser> => {
+    // Jalankan query profiles, user_roles, dan teachers secara paralel untuk memangkas latensi login
+    const [profileInitialRes, rolesInitialRes, teacherInitialRes] = await Promise.all([
+      supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+      supabase.from('user_roles').select('role, is_primary').eq('user_id', userId),
+      supabase.from('teachers').select('id').eq('user_id', userId).maybeSingle(),
+    ]);
 
-  if (isMissingTableError) {
-    throw new Error(
-      'Tabel public.profiles belum ada di proyek Supabase aktif saat ini. Buka SQL Editor di dashboard proyek Supabase baru Anda, jalankan seluruh skrip SQL migrasi, lalu coba hubungkan kembali.'
-    );
-  }
+    let { data: profileData, error: profileError } = profileInitialRes;
+    let { data: rolesData, error: rolesError } = rolesInitialRes;
 
-  // Jika tabel sudah ada tetapi baris profil user belum terbentuk, coba pulihkan otomatis lewat RPC
-  if (!profileData) {
-    try {
-      await supabase.rpc('ensure_current_user_profile');
-      const retryRes = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .maybeSingle();
-      profileData = retryRes.data;
-      profileError = retryRes.error;
-    } catch {
-      // ignore if RPC does not exist yet
+    const isPermissionDenied =
+      profileError?.code === '42501' ||
+      Boolean(profileError?.message && /permission denied/i.test(profileError.message));
+
+    if (isPermissionDenied) {
+      throw new Error(
+        'Izin akses tabel PostgreSQL (GRANT) di proyek Supabase baru belum aktif (42501 permission denied). Salin & jalankan ulang Skrip SQL Lengkap terbaru (atau skrip GRANT) di Supabase SQL Editor.'
+      );
     }
-  }
 
-  if (profileError || !profileData) {
-    throw new Error(
-      'Profil pengguna belum ada di tabel public.profiles. Pastikan skrip SQL migrasi terbaru sudah dijalankan hingga selesai (Success) di Supabase SQL Editor proyek baru Anda.'
-    );
-  }
+    const isMissingTableError =
+      profileError?.code === '42P01' ||
+      profileError?.code === 'PGRST205' ||
+      Boolean(profileError?.message && /does not exist|schema cache/i.test(profileError.message));
 
-  const profile: Profile = profileData;
-
-  if (!profile.is_active) {
-    throw new Error('Akun Anda saat ini dinonaktifkan oleh administrator madrasah.');
-  }
-
-  // 2. Ambil peran pengguna dari user_roles
-  let { data: rolesData, error: rolesError } = await supabase
-    .from('user_roles')
-    .select('role, is_primary')
-    .eq('user_id', userId);
-
-  if (!rolesError && (!rolesData || rolesData.length === 0)) {
-    try {
-      await supabase.rpc('ensure_current_user_profile');
-      const retryRoles = await supabase
-        .from('user_roles')
-        .select('role, is_primary')
-        .eq('user_id', userId);
-      rolesData = retryRoles.data;
-      rolesError = retryRoles.error;
-    } catch {
-      // ignore
+    if (isMissingTableError) {
+      throw new Error(
+        'Tabel public.profiles belum ada di proyek Supabase aktif saat ini. Buka SQL Editor di dashboard proyek Supabase baru Anda, jalankan seluruh skrip SQL migrasi, lalu coba hubungkan kembali.'
+      );
     }
-  }
 
-  if (rolesError || !rolesData || rolesData.length === 0) {
-    throw new Error(
-      'Akun Supabase Auth berhasil masuk, tetapi peran (role) di tabel public.user_roles masih kosong. Salin & jalankan ulang Skrip SQL Lengkap terbaru di Supabase SQL Editor.'
+    // Jika tabel sudah ada tetapi baris profil/role user belum terbentuk, pulihkan otomatis via RPC sekali
+    if (!profileData || (!rolesError && (!rolesData || rolesData.length === 0))) {
+      try {
+        await supabase.rpc('ensure_current_user_profile');
+        const [retryProfile, retryRoles] = await Promise.all([
+          !profileData
+            ? supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
+            : Promise.resolve({ data: profileData, error: profileError }),
+          !rolesData || rolesData.length === 0
+            ? supabase.from('user_roles').select('role, is_primary').eq('user_id', userId)
+            : Promise.resolve({ data: rolesData, error: rolesError }),
+        ]);
+        profileData = retryProfile.data;
+        profileError = retryProfile.error;
+        rolesData = retryRoles.data;
+        rolesError = retryRoles.error;
+      } catch {
+        // ignore if RPC does not exist yet
+      }
+    }
+
+    if (profileError || !profileData) {
+      throw new Error(
+        'Profil pengguna belum ada di tabel public.profiles. Pastikan skrip SQL migrasi terbaru sudah dijalankan hingga selesai (Success) di Supabase SQL Editor proyek baru Anda.'
+      );
+    }
+
+    const profile: Profile = profileData;
+
+    if (!profile.is_active) {
+      throw new Error('Akun Anda saat ini dinonaktifkan oleh administrator madrasah.');
+    }
+
+    if (rolesError || !rolesData || rolesData.length === 0) {
+      throw new Error(
+        'Akun Supabase Auth berhasil masuk, tetapi peran (role) di tabel public.user_roles masih kosong. Salin & jalankan ulang Skrip SQL Lengkap terbaru di Supabase SQL Editor.'
+      );
+    }
+
+    const supabaseRoles: UserRole[] = rolesData.map((r: { role: UserRole }) => r.role);
+    const resolvedEmail = (profile.email || emailFallback || '').trim().toLowerCase();
+    const syncedAppUser = resolvedEmail
+      ? getDemoUsers().find((u) => u.email.trim().toLowerCase() === resolvedEmail)
+      : undefined;
+
+    const combinedRoles = new Set<UserRole>(
+      syncedAppUser?.roles && syncedAppUser.roles.length > 0 ? syncedAppUser.roles : supabaseRoles
     );
-  }
+    if (supabaseRoles.includes('admin') || resolvedEmail === 'alihsansoborejo@gmail.com') {
+      combinedRoles.add('admin');
+    }
+    const roles = sortRolesByPriority(Array.from(combinedRoles));
 
-  const supabaseRoles: UserRole[] = rolesData.map((r: { role: UserRole }) => r.role);
-  const resolvedEmail = (profile.email || emailFallback || '').trim().toLowerCase();
-  const syncedAppUser = resolvedEmail
-    ? getDemoUsers().find((u) => u.email.trim().toLowerCase() === resolvedEmail)
-    : undefined;
-
-  const combinedRoles = new Set<UserRole>(
-    syncedAppUser?.roles && syncedAppUser.roles.length > 0 ? syncedAppUser.roles : supabaseRoles
-  );
-  if (supabaseRoles.includes('admin') || resolvedEmail === 'alihsansoborejo@gmail.com') {
-    combinedRoles.add('admin');
-  }
-  const roles = sortRolesByPriority(Array.from(combinedRoles));
-
-  // 3. Cari teacher_id dan homeroom_class_id jika terdaftar sebagai guru/wali kelas
-  let teacherId: string | null = null;
-  const { data: teacherData } = await supabase
-    .from('teachers')
-    .select('id')
-    .eq('user_id', userId)
-    .maybeSingle();
-
-  if (teacherData) {
-    teacherId = teacherData.id;
-  }
-
-  const resolvedTeacher = await academicService.resolveTeacherForUser({
-    id: userId,
-    email: profile.email || emailFallback || '',
-    profile: { full_name: profile.full_name },
-    teacherId,
-  });
-  teacherId = teacherId || resolvedTeacher?.id || null;
-
-  const resolvedHomeroom = await academicService.resolveHomeroomClassForUser(
-    {
+    let teacherId: string | null = teacherInitialRes.data?.id || null;
+    const resolvedTeacher = await academicService.resolveTeacherForUser({
       id: userId,
       email: profile.email || emailFallback || '',
       profile: { full_name: profile.full_name },
       teacherId,
-    },
-    resolvedTeacher
-  );
+    });
+    teacherId = teacherId || resolvedTeacher?.id || null;
 
-  // Peran aktif: pertahankan pilihan peran user sebelumnya jika masih sah dan tidak baru mendapat peran Kepala Madrasah;
-  // jika belum ada sesi atau baru mendapat peran Kepala Madrasah, aktifkan peran prioritas tertinggi.
-  const persisted = getPersistedSession();
-  const isSamePersistedUser = Boolean(
-    persisted &&
-      (persisted.id === userId || (resolvedEmail && persisted.email.trim().toLowerCase() === resolvedEmail))
-  );
-  const newlyGrantedPrincipal = Boolean(
-    isSamePersistedUser && !persisted!.roles.includes('kepala_madrasah') && roles.includes('kepala_madrasah')
-  );
-  const primaryRoleEntry = rolesData.find((r: { is_primary: boolean }) => r.is_primary);
-  const defaultRole: UserRole = roles.includes('kepala_madrasah')
-    ? 'kepala_madrasah'
-    : primaryRoleEntry && roles.includes(primaryRoleEntry.role)
-      ? primaryRoleEntry.role
-      : roles[0];
+    const resolvedHomeroom = await academicService.resolveHomeroomClassForUser(
+      {
+        id: userId,
+        email: profile.email || emailFallback || '',
+        profile: { full_name: profile.full_name },
+        teacherId,
+      },
+      resolvedTeacher
+    );
 
-  const activeRole: UserRole = newlyGrantedPrincipal
-    ? 'kepala_madrasah'
-    : isSamePersistedUser && roles.includes(persisted!.activeRole)
-      ? persisted!.activeRole
-      : defaultRole;
+    const persisted = getPersistedSession();
+    const isSamePersistedUser = Boolean(
+      persisted &&
+        (persisted.id === userId || (resolvedEmail && persisted.email.trim().toLowerCase() === resolvedEmail))
+    );
+    const newlyGrantedPrincipal = Boolean(
+      isSamePersistedUser && !persisted!.roles.includes('kepala_madrasah') && roles.includes('kepala_madrasah')
+    );
+    const primaryRoleEntry = rolesData.find((r: { is_primary: boolean }) => r.is_primary);
+    const defaultRole: UserRole = roles.includes('kepala_madrasah')
+      ? 'kepala_madrasah'
+      : primaryRoleEntry && roles.includes(primaryRoleEntry.role)
+        ? primaryRoleEntry.role
+        : roles[0];
 
-  const authUser: AuthUser = {
-    id: userId,
-    email: profile.email || emailFallback || '',
-    profile,
-    roles,
-    activeRole,
-    teacherId,
-    homeroomClassId: resolvedHomeroom?.id || null,
-  };
+    const activeRole: UserRole = newlyGrantedPrincipal
+      ? 'kepala_madrasah'
+      : isSamePersistedUser && roles.includes(persisted!.activeRole)
+        ? persisted!.activeRole
+        : defaultRole;
 
-  localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
-  return authUser;
+    const authUser: AuthUser = {
+      id: userId,
+      email: profile.email || emailFallback || '',
+      profile,
+      roles,
+      activeRole,
+      teacherId,
+      homeroomClassId: resolvedHomeroom?.id || null,
+    };
+
+    localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
+    lastFetchedAccount = {
+      userId,
+      user: authUser,
+      expiresAt: Date.now() + ACCOUNT_CACHE_TTL_MS,
+    };
+    return authUser;
+  })();
+
+  accountFetchInflight.set(userId, task);
+  try {
+    return await task;
+  } finally {
+    if (accountFetchInflight.get(userId) === task) {
+      accountFetchInflight.delete(userId);
+    }
+  }
 }
 
 export async function logoutUser(): Promise<void> {
-  if (isSupabaseAvailable()) {
+  // Bersihkan sesi lokal & cache memori seketika agar pindah akun terasa instan
+  localStorage.removeItem(LOCAL_SESSION_KEY);
+  clearAllRuntimeCaches();
+  if (isSupabaseConfigured) {
     try {
-      await supabase.auth.signOut();
+      await Promise.race([
+        supabase.auth.signOut({ scope: 'local' }),
+        new Promise((resolve) => window.setTimeout(resolve, 800)),
+      ]);
     } catch {
-      // ignore remote signout errors so local logout always succeeds
+      // ignore local/remote signout errors so local logout always succeeds
     }
   }
-  localStorage.removeItem(LOCAL_SESSION_KEY);
 }
 
 export function getPersistedSession(): AuthUser | null {

@@ -101,9 +101,20 @@ export const FilePreviewContent: React.FC<FilePreviewBodyProps> = ({
       : driveFileId
       ? `https://drive.google.com/file/d/${driveFileId}/view`
       : '';
-  const drivePreviewIframeUrl = driveFileId
-    ? `https://drive.google.com/file/d/${driveFileId}/preview`
-    : '';
+  const drivePreviewIframeUrl = useMemo(() => {
+    if (!driveFileId) return '';
+    const raw = (currentFile.googleDriveUrl || '').toLowerCase();
+    if (raw.includes('/document/d/')) {
+      return `https://docs.google.com/document/d/${driveFileId}/preview`;
+    }
+    if (raw.includes('/spreadsheets/d/')) {
+      return `https://docs.google.com/spreadsheets/d/${driveFileId}/preview`;
+    }
+    if (raw.includes('/presentation/d/')) {
+      return `https://docs.google.com/presentation/d/${driveFileId}/preview`;
+    }
+    return `https://drive.google.com/file/d/${driveFileId}/preview`;
+  }, [driveFileId, currentFile.googleDriveUrl]);
 
   useEffect(() => {
     if (!currentFile.dataUrl || (!isPdf && !isImage)) {
@@ -460,7 +471,7 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   if (!isOpen || !file) return null;
 
   return (
-    <div className="fixed inset-0 z-50 w-screen h-screen bg-white flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-[80] w-screen h-screen bg-white flex flex-col overflow-hidden">
       <div className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-b border-slate-200 bg-white">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="p-2 rounded-xl bg-emerald-900 text-amber-300 shrink-0">

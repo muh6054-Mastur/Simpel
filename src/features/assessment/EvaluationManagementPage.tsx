@@ -9,6 +9,7 @@ import {
   fileStorageService,
   StoredDocumentFile,
   isRealDriveFileUrl,
+  extractDriveFileIdFromUrl,
 } from '../../services/fileStorageService';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
@@ -77,13 +78,7 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   onNavigate,
 }) => {
   const { user, activeRole } = useAuth();
-  const {
-    selectedSubjectId,
-    selectedClassId,
-    selectedClassLevel,
-    selectedAssignmentId,
-    setWorkspaceSelection,
-  } = useWorkspace();
+  const { selectedSubjectId, selectedClassLevel, setWorkspaceSelection } = useWorkspace();
   const [activeTab, setActiveTab] = useState<EvaluationTab>(defaultTab);
 
   // Master & Assignment States
@@ -247,39 +242,11 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
 
           setSelectedSubject(preferredSbj);
           setSelectedClass(preferredLevel);
-
-          const existingValidAsg =
-            (selectedAssignmentId &&
-              slotsForSbj.find((a) => {
-                if (a.id !== selectedAssignmentId) return false;
-                const lvl = a.class?.level || clss.find((c) => c.id === a.class_id)?.level;
-                return lvl === preferredLevel;
-              })) ||
-            undefined;
-
-          const matchedCls =
-            (selectedClassId &&
-              clss.find(
-                (c) =>
-                  c.id === selectedClassId &&
-                  c.level === preferredLevel &&
-                  slotsForSbj.some((a) => a.class_id === c.id)
-              )) ||
-            clss.find((c) => c.level === preferredLevel && slotsForSbj.some((a) => a.class_id === c.id)) ||
-            clss.find((c) => c.level === preferredLevel);
-
-          const matchedAsg =
-            existingValidAsg ||
-            slotsForSbj.find((a) => !matchedCls || a.class_id === matchedCls.id) ||
-            slotsForSbj[0];
-
-          if (
-            matchedAsg &&
-            (selectedSubjectId !== preferredSbj ||
-              selectedClassId !== matchedAsg.class_id ||
-              selectedClassLevel !== preferredLevel ||
-              selectedAssignmentId !== matchedAsg.id)
-          ) {
+          const matchedCls = clss.find((c) => c.level === preferredLevel);
+          const matchedAsg = relevantAsgs.find(
+            (a) => a.subject_id === preferredSbj && (!matchedCls || a.class_id === matchedCls.id)
+          );
+          if (matchedAsg) {
             setWorkspaceSelection({
               subjectId: preferredSbj,
               classId: matchedAsg.class_id,
@@ -308,17 +275,7 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     } finally {
       setIsLoadingRefs(false);
     }
-  }, [
-    activeRole,
-    user?.id,
-    user?.email,
-    user?.teacherId,
-    user?.profile?.full_name,
-    selectedSubjectId,
-    selectedClassId,
-    selectedClassLevel,
-    selectedAssignmentId,
-  ]);
+  }, [activeRole, user?.id, user?.email, user?.teacherId, user?.profile?.full_name, selectedSubjectId, selectedClassLevel]);
 
   useEffect(() => {
     void loadData();
@@ -331,6 +288,7 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
       'simpel_mi_lingkup_materi_custom_v1',
       'simpel_mi_lingkup_materi_hidden_v1',
       'simpel_assessments',
+      'simpel_grades',
       'simpel_assignments',
       'simpel_subjects',
       'simpel_classes',
@@ -351,8 +309,31 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
 
   const handlePreviewStoredFile = async (doc: DocumentLink) => {
     let stored = doc.file_id ? await fileStorageService.getFileById(doc.file_id) : null;
-    if (!stored && doc.google_drive_url && isRealDriveFileUrl(doc.google_drive_url)) {
+    if (!stored) {
+      const hasDrive = isRealDriveFileUrl(doc.google_drive_url);
       stored = {
+        id: doc.file_id || `doc-preview-${doc.id}`,
+        name: doc.title,
+        size: 0,
+        mimeType: 'application/pdf',
+        category: doc.document_type,
+        uploadedBy: doc.teacher?.full_name || 'Guru Madrasah',
+        uploadedAt: doc.created_at || new Date().toISOString(),
+        googleDriveUrl: hasDrive ? doc.google_drive_url : undefined,
+        driveFileId: extractDriveFileIdFromUrl(doc.google_drive_url),
+      };
+    }
+    setPreviewDocState({ file: stored, docId: doc.id });
+  };
+
+  const handleDownloadStoredFile = async (doc: DocumentLink) => {
+    const stored = doc.file_id ? await fileStorageService.getFileById(doc.file_id) : null;
+    if (stored && (stored.dataUrl || isRealDriveFileUrl(stored.googleDriveUrl))) {
+      fileStorageService.downloadStoredFile(stored);
+      return;
+    }
+    if (isRealDriveFileUrl(doc.google_drive_url)) {
+      fileStorageService.downloadStoredFile({
         id: doc.file_id || doc.id,
         name: doc.title,
         size: 0,
@@ -361,23 +342,11 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
         uploadedBy: doc.teacher?.full_name || 'Guru Madrasah',
         uploadedAt: doc.created_at || new Date().toISOString(),
         googleDriveUrl: doc.google_drive_url,
-      };
-    }
-    if (!stored) {
-      notify('Berkas fisik tidak ditemukan di perangkat ini. Silakan buka via tautan Google Drive.');
+        driveFileId: extractDriveFileIdFromUrl(doc.google_drive_url),
+      });
       return;
     }
-    setPreviewDocState({ file: stored, docId: doc.id });
-  };
-
-  const handleDownloadStoredFile = async (doc: DocumentLink) => {
-    if (!doc.file_id) return;
-    const stored = await fileStorageService.getFileById(doc.file_id);
-    if (!stored) {
-      notify('Berkas fisik tidak ditemukan di perangkat ini. Silakan unduh melalui Google Drive.');
-      return;
-    }
-    fileStorageService.downloadStoredFile(stored);
+    await handlePreviewStoredFile(doc);
   };
 
   const availableSubjects: Subject[] =
@@ -416,24 +385,13 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     allSubjects.find((s) => s.id === selectedSubject);
   const currentSubjectName = currentSubjectObj?.name || 'Mata Pelajaran';
   const currentClassObj =
-    (selectedClassId &&
-      (availableClasses.find((c) => c.id === selectedClassId && c.level === selectedClass) ||
-        allClasses.find((c) => c.id === selectedClassId && c.level === selectedClass))) ||
     availableClasses.find((c) => c.level === selectedClass) ||
     allClasses.find((c) => c.level === selectedClass);
-  const currentAssignmentObj =
-    (selectedAssignmentId &&
-      teacherAssignments.find(
-        (a) =>
-          a.id === selectedAssignmentId &&
-          a.subject_id === selectedSubject &&
-          (!currentClassObj || a.class_id === currentClassObj.id)
-      )) ||
-    teacherAssignments.find(
-      (a) =>
-        a.subject_id === selectedSubject &&
-        (!currentClassObj || a.class_id === currentClassObj.id)
-    );
+  const currentAssignmentObj = teacherAssignments.find(
+    (a) =>
+      a.subject_id === selectedSubject &&
+      (!currentClassObj || a.class_id === currentClassObj.id)
+  );
   const filteredAssessmentsCount = assessments.filter((a) => {
     if (currentAssignmentObj) return a.assignment_id === currentAssignmentObj.id;
     const asg = a.assignment || teacherAssignments.find((t) => t.id === a.assignment_id);
@@ -453,15 +411,8 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     activeSemesterType
   );
   const currentScopeConfig =
-    availableScopes.find((s) => s.scope_key === selectedScope) ||
-    ((activeTab === 'asesmen-nilai' || activeTab === 'remedial-pengayaan')
-      ? presetTemplates.find((s) => s.scope_key === selectedScope)
-      : undefined) ||
-    availableScopes[0];
-  const effectiveScope =
-    currentScopeConfig?.scope_key ||
-    (activeTab === 'asesmen-nilai' || activeTab === 'remedial-pengayaan' ? selectedScope : '') ||
-    '';
+    availableScopes.find((s) => s.scope_key === selectedScope) || availableScopes[0];
+  const effectiveScope = currentScopeConfig?.scope_key || '';
 
   // Filter butir kisi-kisi per Mapel, Kelas, dan Lingkup Materi / STS / SAS
   const filteredKisi = effectiveScope

@@ -83,20 +83,6 @@ export function isUserCurrentlyEditing(): boolean {
   return false;
 }
 
-export function markDomUnsavedEdit(): void {
-  if (typeof window === 'undefined') return;
-  const state = getGuardState();
-  state.hasUnsavedDomEdit = true;
-  state.lastEditAt = Date.now();
-}
-
-export function clearDomUnsavedEdit(): void {
-  if (typeof window === 'undefined') return;
-  const state = getGuardState();
-  state.hasUnsavedDomEdit = false;
-  state.lastEditAt = 0;
-}
-
 export function notifyDomFormSaved(): void {
   if (typeof window === 'undefined') return;
   const state = getGuardState();
@@ -142,10 +128,11 @@ function ensureGlobalEditListeners(): void {
 
     const btnType = (btn.getAttribute('type') || '').toLowerCase();
     const label = (btn.textContent || '').trim().toLowerCase();
-    // Catatan: Jangan sertakan "terapkan" di sini karena "Terapkan ke Semua" membuat perubahan belum tersimpan
     const isSaveOrCloseAction =
       btnType === 'submit' ||
-      /\b(simpan|save|kirim|perbarui|submit|batal|tutup|close|cancel)\b/i.test(label);
+      /\b(simpan|save|kirim|perbarui|tambahkan|update|submit|terapkan|batal|tutup|close|cancel)\b/i.test(
+        label
+      );
 
     if (isSaveOrCloseAction) {
       state.hasUnsavedDomEdit = false;
@@ -175,14 +162,11 @@ function ensureGlobalEditListeners(): void {
  */
 export function useRealtimeSync(
   watchedKeys: string[] | '*',
-  onRemoteUpdate: () => void,
-  includeFileSync = false,
-  shouldDefer?: () => boolean
+  onRemoteUpdate: (changedKeys?: string[]) => void,
+  includeFileSync = false
 ): void {
   const callbackRef = useRef(onRemoteUpdate);
   callbackRef.current = onRemoteUpdate;
-  const shouldDeferRef = useRef(shouldDefer);
-  shouldDeferRef.current = shouldDefer;
 
   const keysSignature = watchedKeys === '*' ? '*' : watchedKeys.join('|');
 
@@ -193,12 +177,17 @@ export function useRealtimeSync(
     let debounceTimer: number | null = null;
     let retryTimer: number | null = null;
     let pendingReload = false;
+    let pendingChangedKeys = new Set<string>();
 
-    const isDeferredNow = () =>
-      isUserCurrentlyEditing() || Boolean(shouldDeferRef.current?.());
+    const consumeChangedKeys = (): string[] | undefined => {
+      if (pendingChangedKeys.size === 0) return undefined;
+      const arr = Array.from(pendingChangedKeys);
+      pendingChangedKeys = new Set<string>();
+      return arr;
+    };
 
     const flushOrDefer = () => {
-      if (isDeferredNow()) {
+      if (isUserCurrentlyEditing()) {
         pendingReload = true;
         if (retryTimer === null) {
           retryTimer = window.setInterval(() => {
@@ -209,13 +198,13 @@ export function useRealtimeSync(
               }
               return;
             }
-            if (!isDeferredNow()) {
+            if (!isUserCurrentlyEditing()) {
               pendingReload = false;
               if (retryTimer !== null) {
                 window.clearInterval(retryTimer);
                 retryTimer = null;
               }
-              callbackRef.current();
+              callbackRef.current(consumeChangedKeys());
             }
           }, 1200);
         }
@@ -227,7 +216,7 @@ export function useRealtimeSync(
         window.clearInterval(retryTimer);
         retryTimer = null;
       }
-      callbackRef.current();
+      callbackRef.current(consumeChangedKeys());
     };
 
     const handleEditSettled = () => {
@@ -245,32 +234,35 @@ export function useRealtimeSync(
 
     guardState.listeners.add(handleEditSettled);
 
-    const triggerReload = () => {
+    const triggerReload = (keys?: string[]) => {
+      if (Array.isArray(keys)) {
+        keys.forEach((k) => pendingChangedKeys.add(k));
+      }
       if (debounceTimer !== null) {
         window.clearTimeout(debounceTimer);
       }
       debounceTimer = window.setTimeout(() => {
         debounceTimer = null;
         flushOrDefer();
-      }, 120);
+      }, 80);
     };
 
     const handleRemoteSync = (event: Event) => {
       const custom = event as CustomEvent<{ keys?: string[] }>;
       const changedKeys = custom.detail?.keys || [];
       if (watchedKeys === '*' || changedKeys.includes('*')) {
-        triggerReload();
+        triggerReload(changedKeys);
         return;
       }
-      const hasMatch = changedKeys.some((k) => watchedKeys.includes(k));
-      if (hasMatch) {
-        triggerReload();
+      const matched = changedKeys.filter((k) => watchedKeys.includes(k));
+      if (matched.length > 0) {
+        triggerReload(matched);
       }
     };
 
     const handleFileSync = () => {
       if (includeFileSync) {
-        triggerReload();
+        triggerReload(['simpel_drive_files_v1']);
       }
     };
 

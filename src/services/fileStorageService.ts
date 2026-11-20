@@ -63,7 +63,7 @@ export function extractFolderIdFromUrl(url: string): string | undefined {
 
 export function extractDriveFileIdFromUrl(url?: string): string | undefined {
   if (!url) return undefined;
-  const fileMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  const fileMatch = url.match(/\/(?:file|document|spreadsheets|presentation)\/d\/([a-zA-Z0-9_-]+)/i);
   if (fileMatch?.[1]) return fileMatch[1];
   const openMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
   if (openMatch?.[1] && !url.includes('/folders/')) return openMatch[1];
@@ -81,7 +81,7 @@ export function isRealDriveFileUrl(url?: string): boolean {
     /\/document\/d\/[a-zA-Z0-9_-]+/i.test(trimmed) ||
     /\/spreadsheets\/d\/[a-zA-Z0-9_-]+/i.test(trimmed) ||
     /\/presentation\/d\/[a-zA-Z0-9_-]+/i.test(trimmed) ||
-    (/drive\.google\.com\/open\?id=/i.test(trimmed) && !trimmed.includes('/folders/'))
+    (/drive\.google\.com\/(?:open|uc)\?[^#]*id=/i.test(trimmed) && !trimmed.includes('/folders/'))
   );
 }
 
@@ -904,8 +904,14 @@ export const fileStorageService = {
    */
   downloadStoredFile(file: StoredDocumentFile): void {
     if (!file.dataUrl) {
-      if (file.googleDriveUrl) {
-        window.open(file.googleDriveUrl, '_blank', 'noopener,noreferrer');
+      if (file.googleDriveUrl && isRealDriveFileUrl(file.googleDriveUrl)) {
+        const link = document.createElement('a');
+        link.href = file.googleDriveUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
       }
       return;
     }
@@ -923,31 +929,18 @@ export const fileStorageService = {
    */
   previewStoredFile(file: StoredDocumentFile): void {
     if (!file.dataUrl) {
-      if (file.googleDriveUrl) {
-        window.open(file.googleDriveUrl, '_blank');
+      if (file.googleDriveUrl && isRealDriveFileUrl(file.googleDriveUrl)) {
+        const link = document.createElement('a');
+        link.href = file.googleDriveUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
       }
       return;
     }
-
-    // Buka data URL di tab baru
-    const win = window.open();
-    if (win) {
-      if (file.mimeType.includes('pdf')) {
-        win.document.write(`
-          <title>${file.name}</title>
-          <iframe src="${file.dataUrl}" frameborder="0" style="border:0; top:0; left:0; bottom:0; right:0; width:100%; height:100%;" allowfullscreen></iframe>
-        `);
-      } else if (file.mimeType.startsWith('image/')) {
-        win.document.write(`
-          <title>${file.name}</title>
-          <body style="margin:0; background:#111; display:flex; align-items:center; justify-content:center; height:100vh;">
-            <img src="${file.dataUrl}" style="max-width:90%; max-height:90%; box-shadow:0 0 20px rgba(0,0,0,0.5);" />
-          </body>
-        `);
-      } else {
-        this.downloadStoredFile(file);
-      }
-    }
+    this.downloadStoredFile(file);
   },
 
   /**

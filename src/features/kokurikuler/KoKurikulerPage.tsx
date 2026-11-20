@@ -8,6 +8,7 @@ import {
   fileStorageService,
   StoredDocumentFile,
   isRealDriveFileUrl,
+  extractDriveFileIdFromUrl,
 } from '../../services/fileStorageService';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
@@ -515,7 +516,8 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
 
   const handlePreviewItem = async (item: KoKurikulerItem) => {
     let stored = item.file_id ? await fileStorageService.getFileById(item.file_id) : null;
-    if (!stored && item.google_drive_url && isRealDriveFileUrl(item.google_drive_url)) {
+    if (!stored) {
+      const hasDrive = isRealDriveFileUrl(item.google_drive_url);
       stored = {
         id: item.file_id || `drive-${item.id}`,
         name: item.file_name || item.title,
@@ -524,28 +526,39 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
         category: currentMeta.driveCategory,
         uploadedBy: item.teacher_name || 'Guru Madrasah',
         uploadedAt: item.updated_at || item.created_at,
-        googleDriveUrl: item.google_drive_url,
+        googleDriveUrl: hasDrive ? item.google_drive_url : undefined,
+        driveFileId: extractDriveFileIdFromUrl(item.google_drive_url),
       };
-    }
-    if (!stored) {
-      notify('Berkas lokal tidak ditemukan di perangkat ini. Silakan buka tautan Google Drive.');
-      return;
     }
     setPreviewModalState({
       file: stored,
       title: `Pratinjau: ${item.title}`,
+      driveUploadError: stored.driveUploadError,
       itemId: item.id,
     });
   };
 
-  const handleDownloadItem = async (fileId?: string) => {
-    if (!fileId) return;
-    const stored = await fileStorageService.getFileById(fileId);
-    if (!stored) {
-      notify('Berkas lokal tidak ditemukan di perangkat ini. Silakan unduh melalui Google Drive.');
+  const handleDownloadItem = async (fileId?: string, driveUrl?: string, fallbackName?: string) => {
+    const stored = fileId ? await fileStorageService.getFileById(fileId) : null;
+    if (stored && (stored.dataUrl || isRealDriveFileUrl(stored.googleDriveUrl))) {
+      fileStorageService.downloadStoredFile(stored);
       return;
     }
-    fileStorageService.downloadStoredFile(stored);
+    if (isRealDriveFileUrl(driveUrl)) {
+      fileStorageService.downloadStoredFile({
+        id: fileId || `drive-${Date.now()}`,
+        name: fallbackName || 'Dokumen Ko Kurikuler',
+        size: 0,
+        mimeType: 'application/pdf',
+        category: currentMeta.driveCategory,
+        uploadedBy: 'Guru Madrasah',
+        uploadedAt: new Date().toISOString(),
+        googleDriveUrl: driveUrl,
+        driveFileId: extractDriveFileIdFromUrl(driveUrl),
+      });
+      return;
+    }
+    notify('Berkas lokal tidak ditemukan di perangkat ini. Silakan klik Preview Dokumen.');
   };
 
   const handleReviewStatus = async (
@@ -966,7 +979,7 @@ export const KoKurikulerPage: React.FC<KoKurikulerPageProps> = ({
                         {item.file_id && (
                           <button
                             type="button"
-                            onClick={() => void handleDownloadItem(item.file_id)}
+                            onClick={() => void handleDownloadItem(item.file_id, item.google_drive_url, item.file_name || item.title)}
                             className="px-2 py-1 rounded bg-slate-100 hover:bg-emerald-100 text-slate-700 hover:text-emerald-800 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer"
                             title="Unduh Berkas"
                           >

@@ -11,12 +11,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
-import {
-  useRealtimeSync,
-  notifyDomFormSaved,
-  markDomUnsavedEdit,
-  clearDomUnsavedEdit,
-} from '../../hooks/useRealtimeSync';
+import { useRealtimeSync, notifyDomFormSaved } from '../../hooks/useRealtimeSync';
 import {
   FileSpreadsheet,
   Award,
@@ -70,14 +65,8 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [editingDescStudentId, setEditingDescStudentId] = useState<string | null>(null);
-  const [rawScores, setRawScores] = useState<Record<string, string>>({});
+  const [scoreDrafts, setScoreDrafts] = useState<Record<string, string>>({});
   const isLedgerDirtyRef = useRef<boolean>(false);
-  const isSavingRef = useRef<boolean>(false);
-  const lastLocalSaveAtRef = useRef<number>(0);
-  const hasLoadedOnceRef = useRef<boolean>(false);
-  const loadSeqRef = useRef<number>(0);
-  const rawScoresRef = useRef(rawScores);
-  rawScoresRef.current = rawScores;
 
   const isTeacherRole = activeRole === 'guru';
   const isHomeroomRole = activeRole === 'wali_kelas';
@@ -149,9 +138,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         scopedClasses[0]?.id ||
         '';
 
-      if (targetClass !== selectedClassId) {
-        setSelectedClassId(targetClass);
-      }
+      setSelectedClassId(targetClass);
 
       const validSubjectsForClass = isTeacherRole
         ? scopedSubjects.filter((s) =>
@@ -169,16 +156,9 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         validSubjectsForClass[0]?.id ||
         '';
 
-      if (targetSubject !== selectedSubjectId) {
-        setSelectedSubjectId(targetSubject);
-      }
+      setSelectedSubjectId(targetSubject);
 
-      if (
-        (!targetClass || (viewMode === 'per-mapel' && !targetSubject)) &&
-        !isSavingRef.current &&
-        !isLedgerDirtyRef.current &&
-        Date.now() - lastLocalSaveAtRef.current >= 4000
-      ) {
+      if (!targetClass || (viewMode === 'per-mapel' && !targetSubject)) {
         setSubjectScores([]);
         setOverallRows([]);
         setOverallSubjects([]);
@@ -191,31 +171,16 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   };
 
   const loadLedgerData = async (silent = false) => {
-    if (
-      silent &&
-      (isSavingRef.current ||
-        isLedgerDirtyRef.current ||
-        Date.now() - lastLocalSaveAtRef.current < 4000)
-    ) {
-      return;
-    }
-    const reqId = ++loadSeqRef.current;
-
     if (!selectedClassId || (viewMode === 'per-mapel' && !selectedSubjectId)) {
       setSubjectScores([]);
       setOverallRows([]);
       setOverallSubjects([]);
-      setRawScores({});
       setIsLoading(false);
       return;
     }
 
-    const shouldShowSpinner = !silent && !hasLoadedOnceRef.current;
-    if (shouldShowSpinner) {
-      setIsLoading(true);
-    }
     if (!silent) {
-      setRawScores({});
+      setIsLoading(true);
     }
     try {
       setIsLocked(reportService.isReportCardLocked(selectedClassId));
@@ -223,29 +188,17 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       if (viewMode === 'per-mapel') {
         if (!silent || !isLedgerDirtyRef.current) {
           const scores = await reportService.getSubjectLedger(selectedClassId, selectedSubjectId);
-          if (
-            reqId !== loadSeqRef.current ||
-            isSavingRef.current ||
-            (silent && (isLedgerDirtyRef.current || Date.now() - lastLocalSaveAtRef.current < 4000))
-          ) {
-            return;
-          }
           setSubjectScores(scores);
-          hasLoadedOnceRef.current = true;
         }
       } else {
         const { subjects: sbjs, rows } = await reportService.getClassOverallLedger(selectedClassId);
-        if (reqId !== loadSeqRef.current || isSavingRef.current) {
-          return;
-        }
         setOverallSubjects(sbjs);
         setOverallRows(rows);
-        hasLoadedOnceRef.current = true;
       }
     } catch (err) {
       console.error('Gagal memuat data leger nilai:', err);
     } finally {
-      if (shouldShowSpinner || !silent) {
+      if (!silent) {
         setIsLoading(false);
       }
     }
@@ -276,9 +229,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   useEffect(() => {
     isLedgerDirtyRef.current = false;
-    hasLoadedOnceRef.current = false;
-    clearDomUnsavedEdit();
-    setRawScores({});
+    setScoreDrafts({});
     if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
       void loadLedgerData(false);
     } else {
@@ -307,31 +258,33 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       'simpel_academic_years',
       'simpel_semesters',
     ],
-    () => {
-      if (
-        isSavingRef.current ||
-        isLedgerDirtyRef.current ||
-        Date.now() - lastLocalSaveAtRef.current < 4000
-      ) {
+    (changedKeys) => {
+      if (isLedgerDirtyRef.current) return;
+      const ledgerOnlyKeys = new Set([
+        'simpel_subject_ledger_v1',
+        'simpel_report_card_locks_v1',
+        'simpel_assessments',
+        'simpel_grades',
+        'simpel_remedial',
+      ]);
+      const onlyLedgerChanged =
+        Array.isArray(changedKeys) &&
+        changedKeys.length > 0 &&
+        changedKeys.every((k) => ledgerOnlyKeys.has(k));
+
+      if (onlyLedgerChanged) {
+        if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
+          void loadLedgerData(true);
+        }
         return;
       }
+
       void loadBaseData().then(() => {
-        if (
-          !isSavingRef.current &&
-          !isLedgerDirtyRef.current &&
-          Date.now() - lastLocalSaveAtRef.current >= 4000 &&
-          selectedClassId &&
-          (viewMode === 'rekap-kelas' || selectedSubjectId)
-        ) {
+        if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
           void loadLedgerData(true);
         }
       });
-    },
-    true,
-    () =>
-      isSavingRef.current ||
-      isLedgerDirtyRef.current ||
-      Date.now() - lastLocalSaveAtRef.current < 4000
+    }
   );
 
   // Handle Score Change
@@ -342,7 +295,6 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   ) => {
     if (isLocked) return;
     isLedgerDirtyRef.current = true;
-    markDomUnsavedEdit();
 
     const kktpVal = Number(settings?.kktp_default ?? 75);
     const subjName =
@@ -401,35 +353,32 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     );
   };
 
-  const handleRawLedgerScoreChange = (
-    studentId: string,
-    field: 'lm1' | 'lm2' | 'lm3' | 'lm4' | 'stsScore' | 'sasScore',
-    raw: string
-  ) => {
+  type LedgerFieldKey = 'lm1' | 'lm2' | 'lm3' | 'lm4' | 'stsScore' | 'sasScore';
+
+  const handleScoreDraftChange = (studentId: string, field: LedgerFieldKey, rawText: string) => {
     if (isLocked) return;
-    const key = `${studentId}_${field}`;
-    setRawScores((prev) => ({
-      ...prev,
-      [key]: raw,
-    }));
-    const normalizedRaw = raw.replace(',', '.');
-    if (normalizedRaw.trim() === '') {
-      handleScoreChange(studentId, field, 0);
+    isLedgerDirtyRef.current = true;
+    const draftKey = `${studentId}::${field}`;
+    const digits = rawText.replace(/[^0-9]/g, '');
+    if (digits === '') {
+      setScoreDrafts((prev) => ({ ...prev, [draftKey]: '' }));
       return;
     }
-    const parsed = Number(normalizedRaw);
-    handleScoreChange(studentId, field, Number.isNaN(parsed) ? 0 : Math.min(100, Math.max(0, parsed)));
+    const clamped = Math.min(100, Math.max(0, parseInt(digits, 10)));
+    setScoreDrafts((prev) => ({ ...prev, [draftKey]: String(clamped) }));
+    handleScoreChange(studentId, field, clamped);
   };
 
-  const handleLedgerScoreBlur = (
-    studentId: string,
-    field: 'lm1' | 'lm2' | 'lm3' | 'lm4' | 'stsScore' | 'sasScore'
-  ) => {
-    const key = `${studentId}_${field}`;
-    setRawScores((prev) => {
-      if (!(key in prev)) return prev;
+  const handleScoreDraftBlur = (studentId: string, field: LedgerFieldKey) => {
+    const draftKey = `${studentId}::${field}`;
+    const raw = scoreDrafts[draftKey];
+    if (raw === '') {
+      handleScoreChange(studentId, field, 0);
+    }
+    setScoreDrafts((prev) => {
+      if (!(draftKey in prev)) return prev;
       const next = { ...prev };
-      delete next[key];
+      delete next[draftKey];
       return next;
     });
   };
@@ -441,7 +390,6 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   ) => {
     if (isLocked) return;
     isLedgerDirtyRef.current = true;
-    markDomUnsavedEdit();
     setSubjectScores((prev) =>
       prev.map((item) =>
         item.studentId === studentId
@@ -454,7 +402,6 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const handleResetStudentDesc = (studentId: string) => {
     if (isLocked) return;
     isLedgerDirtyRef.current = true;
-    markDomUnsavedEdit();
     const kktpVal = Number(settings?.kktp_default ?? 75);
     const subjName =
       availableSubjectsForClass.find((s) => s.id === selectedSubjectId)?.name ||
@@ -525,7 +472,6 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
     setSubjectScores(regenerated);
     setEditingDescStudentId(null);
-    lastLocalSaveAtRef.current = Date.now();
     await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, regenerated, false);
     isLedgerDirtyRef.current = false;
     notifyDomFormSaved();
@@ -535,16 +481,10 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
   // Simpan Perubahan Leger
   const handleSaveLedger = async () => {
-    if (isSavingRef.current) return;
-    isSavingRef.current = true;
-    lastLocalSaveAtRef.current = Date.now();
-    loadSeqRef.current++;
     setIsSaving(true);
     try {
       await reportService.saveSubjectLedger(selectedClassId, selectedSubjectId, subjectScores, true);
-      lastLocalSaveAtRef.current = Date.now();
       isLedgerDirtyRef.current = false;
-      setRawScores({});
       notifyDomFormSaved();
       setStatusMessage('Data nilai leger mata pelajaran berhasil disimpan dan siap masuk ke Buku Rapor.');
       setTimeout(() => setStatusMessage(null), 3500);
@@ -552,16 +492,13 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       console.error('Gagal menyimpan leger:', err);
       setStatusMessage('Gagal menyimpan perubahan leger nilai.');
     } finally {
-      isSavingRef.current = false;
       setIsSaving(false);
     }
   };
 
   // Tarik Nilai Terbaru dari Daftar Nilai & Remedial
   const handlePullFromGrades = async () => {
-    if (!selectedClassId || !selectedSubjectId || isLocked || isSavingRef.current) return;
-    isSavingRef.current = true;
-    lastLocalSaveAtRef.current = Date.now();
+    if (!selectedClassId || !selectedSubjectId || isLocked) return;
     setIsSaving(true);
     try {
       const { updatedStudents, filledSlots } = await reportService.syncFromAssessmentsForSubject(
@@ -569,9 +506,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         selectedSubjectId,
         { forceOverwrite: true }
       );
-      isLedgerDirtyRef.current = false;
-      notifyDomFormSaved();
-      await loadLedgerData(false);
+      await loadLedgerData();
       if (filledSlots > 0) {
         setStatusMessage(
           `Berhasil menarik ${filledSlots} entri nilai untuk ${updatedStudents} siswa dari Daftar Nilai & Remedial ke Leger.`
@@ -584,7 +519,6 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       console.error('Gagal menarik nilai dari Daftar Nilai:', err);
       setStatusMessage('Gagal menyinkronkan nilai dari Daftar Nilai.');
     } finally {
-      isSavingRef.current = false;
       setIsSaving(false);
     }
   };
@@ -1150,20 +1084,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                       {/* Input Nilai LM1 */}
                       <td className="py-1.5 px-1 text-center border-l border-emerald-100">
                         <input
-                          type="number"
-                          min="0"
-                          max="100"
+                          type="text"
+                          inputMode="numeric"
                           disabled={isLocked}
-                          value={
-                            rawScores[`${row.studentId}_lm1`] !== undefined
-                              ? rawScores[`${row.studentId}_lm1`]
-                              : String(row.lmScores.lm1)
-                          }
+                          value={scoreDrafts[`${row.studentId}::lm1`] ?? String(row.lmScores.lm1)}
                           onChange={(e) =>
-                            handleRawLedgerScoreChange(row.studentId, 'lm1', e.target.value)
+                            handleScoreDraftChange(row.studentId, 'lm1', e.target.value)
                           }
-                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm1')}
-                          onWheel={(e) => e.currentTarget.blur()}
+                          onBlur={() => handleScoreDraftBlur(row.studentId, 'lm1')}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1171,20 +1099,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                       {/* Input Nilai LM2 */}
                       <td className="py-1.5 px-1 text-center">
                         <input
-                          type="number"
-                          min="0"
-                          max="100"
+                          type="text"
+                          inputMode="numeric"
                           disabled={isLocked}
-                          value={
-                            rawScores[`${row.studentId}_lm2`] !== undefined
-                              ? rawScores[`${row.studentId}_lm2`]
-                              : String(row.lmScores.lm2)
-                          }
+                          value={scoreDrafts[`${row.studentId}::lm2`] ?? String(row.lmScores.lm2)}
                           onChange={(e) =>
-                            handleRawLedgerScoreChange(row.studentId, 'lm2', e.target.value)
+                            handleScoreDraftChange(row.studentId, 'lm2', e.target.value)
                           }
-                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm2')}
-                          onWheel={(e) => e.currentTarget.blur()}
+                          onBlur={() => handleScoreDraftBlur(row.studentId, 'lm2')}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1192,20 +1114,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                       {/* Input Nilai LM3 */}
                       <td className="py-1.5 px-1 text-center">
                         <input
-                          type="number"
-                          min="0"
-                          max="100"
+                          type="text"
+                          inputMode="numeric"
                           disabled={isLocked}
-                          value={
-                            rawScores[`${row.studentId}_lm3`] !== undefined
-                              ? rawScores[`${row.studentId}_lm3`]
-                              : String(row.lmScores.lm3)
-                          }
+                          value={scoreDrafts[`${row.studentId}::lm3`] ?? String(row.lmScores.lm3)}
                           onChange={(e) =>
-                            handleRawLedgerScoreChange(row.studentId, 'lm3', e.target.value)
+                            handleScoreDraftChange(row.studentId, 'lm3', e.target.value)
                           }
-                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm3')}
-                          onWheel={(e) => e.currentTarget.blur()}
+                          onBlur={() => handleScoreDraftBlur(row.studentId, 'lm3')}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1213,20 +1129,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                       {/* Input Nilai LM4 */}
                       <td className="py-1.5 px-1 text-center border-r border-emerald-100">
                         <input
-                          type="number"
-                          min="0"
-                          max="100"
+                          type="text"
+                          inputMode="numeric"
                           disabled={isLocked}
-                          value={
-                            rawScores[`${row.studentId}_lm4`] !== undefined
-                              ? rawScores[`${row.studentId}_lm4`]
-                              : String(row.lmScores.lm4)
-                          }
+                          value={scoreDrafts[`${row.studentId}::lm4`] ?? String(row.lmScores.lm4)}
                           onChange={(e) =>
-                            handleRawLedgerScoreChange(row.studentId, 'lm4', e.target.value)
+                            handleScoreDraftChange(row.studentId, 'lm4', e.target.value)
                           }
-                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'lm4')}
-                          onWheel={(e) => e.currentTarget.blur()}
+                          onBlur={() => handleScoreDraftBlur(row.studentId, 'lm4')}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1239,20 +1149,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                       {/* Input Nilai STS */}
                       <td className="py-1.5 px-1 text-center">
                         <input
-                          type="number"
-                          min="0"
-                          max="100"
+                          type="text"
+                          inputMode="numeric"
                           disabled={isLocked}
-                          value={
-                            rawScores[`${row.studentId}_stsScore`] !== undefined
-                              ? rawScores[`${row.studentId}_stsScore`]
-                              : String(row.stsScore)
-                          }
+                          value={scoreDrafts[`${row.studentId}::stsScore`] ?? String(row.stsScore)}
                           onChange={(e) =>
-                            handleRawLedgerScoreChange(row.studentId, 'stsScore', e.target.value)
+                            handleScoreDraftChange(row.studentId, 'stsScore', e.target.value)
                           }
-                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'stsScore')}
-                          onWheel={(e) => e.currentTarget.blur()}
+                          onBlur={() => handleScoreDraftBlur(row.studentId, 'stsScore')}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>
@@ -1260,20 +1164,14 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                       {/* Input Nilai SAS */}
                       <td className="py-1.5 px-1 text-center">
                         <input
-                          type="number"
-                          min="0"
-                          max="100"
+                          type="text"
+                          inputMode="numeric"
                           disabled={isLocked}
-                          value={
-                            rawScores[`${row.studentId}_sasScore`] !== undefined
-                              ? rawScores[`${row.studentId}_sasScore`]
-                              : String(row.sasScore)
-                          }
+                          value={scoreDrafts[`${row.studentId}::sasScore`] ?? String(row.sasScore)}
                           onChange={(e) =>
-                            handleRawLedgerScoreChange(row.studentId, 'sasScore', e.target.value)
+                            handleScoreDraftChange(row.studentId, 'sasScore', e.target.value)
                           }
-                          onBlur={() => handleLedgerScoreBlur(row.studentId, 'sasScore')}
-                          onWheel={(e) => e.currentTarget.blur()}
+                          onBlur={() => handleScoreDraftBlur(row.studentId, 'sasScore')}
                           className="w-12 text-center font-mono py-1 border border-emerald-200 rounded focus:border-emerald-600 focus:outline-hidden disabled:bg-slate-50"
                         />
                       </td>

@@ -5,20 +5,13 @@ import {
   GoogleAuthProvider,
   onAuthStateChanged,
   signOut,
-  Auth,
   User as FirebaseUser,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-// Inisialisasi Firebase App secara aman (singleton, tahan terhadap iframe/storage terbatas)
-let firebaseAuthInstance: Auth | null = null;
-try {
-  const firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-  firebaseAuthInstance = getAuth(firebaseApp);
-} catch (err) {
-  console.warn('[GoogleDrive] Firebase Auth unavailable in current browser context:', err);
-}
-export const firebaseAuth = firebaseAuthInstance;
+// Inisialisasi Firebase App secara aman (singleton)
+const firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+export const firebaseAuth = getAuth(firebaseApp);
 
 export const GOOGLE_DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
@@ -54,10 +47,6 @@ export const initGoogleDriveAuth = (
   onAuthSuccess?: (user: FirebaseUser, token: string) => void,
   onAuthFailure?: () => void
 ) => {
-  if (!firebaseAuth) {
-    if (onAuthFailure) onAuthFailure();
-    return () => {};
-  }
   return onAuthStateChanged(firebaseAuth, async (user: FirebaseUser | null) => {
     currentGoogleUser = user;
     if (user && cachedAccessToken) {
@@ -71,9 +60,6 @@ export const initGoogleDriveAuth = (
 
 // Hubungkan Google Drive melalui Pop-up Google Sign-In
 export const connectGoogleDrive = async (): Promise<{ user: FirebaseUser; accessToken: string }> => {
-  if (!firebaseAuth) {
-    throw new Error('Autentikasi Google Pop-up tidak didukung pada mode jendela saat ini. Gunakan sinkronisasi Apps Script.');
-  }
   try {
     isSigningIn = true;
     const result = await signInWithPopup(firebaseAuth, provider);
@@ -111,9 +97,7 @@ export const getConnectedGoogleUser = (): FirebaseUser | null => {
 
 // Putuskan koneksi Google Drive
 export const disconnectGoogleDrive = async (): Promise<void> => {
-  if (firebaseAuth) {
-    await signOut(firebaseAuth);
-  }
+  await signOut(firebaseAuth);
   cachedAccessToken = null;
   currentGoogleUser = null;
 };

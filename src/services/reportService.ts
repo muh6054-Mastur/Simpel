@@ -68,35 +68,59 @@ function emitLedgerSync(keys: string[]): void {
   window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys } }));
 }
 
-function normalizeTimeMs(value?: string | null): number {
-  if (!value) return 0;
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) return 0;
-  if (ms > Date.now() + 5 * 60_000) {
-    return ms - 7 * 3600_000;
-  }
-  return ms;
-}
-
-function normalizeToUtcIso(value?: string | null, fallbackIso?: string): string {
-  const ms = normalizeTimeMs(value);
-  if (ms > 0) return new Date(ms).toISOString();
-  return fallbackIso || new Date().toISOString();
-}
-
 function maxTimestamp(...values: Array<string | null | undefined>): string {
+  let best = '';
   let bestMs = 0;
   for (const v of values) {
     if (!v) continue;
-    const ms = normalizeTimeMs(v);
-    if (ms > bestMs) {
+    const ms = Date.parse(v);
+    if (!Number.isNaN(ms) && ms >= bestMs) {
       bestMs = ms;
+      best = v;
+    } else if (!best) {
+      best = v;
     }
   }
-  return bestMs > 0 ? new Date(bestMs).toISOString() : new Date().toISOString();
+  return best || new Date().toISOString();
 }
 
-async function loadMergedAssessmentSources(): Promise<{
+const REPORT_SOURCE_CACHE_TTL_MS = 20_000;
+let mergedSourcesCache: {
+  value: { assessments: Assessment[]; grades: Grade[]; remedials: RemedialRecord[] };
+  expiresAt: number;
+} | null = null;
+let mergedSourcesInflight: Promise<{
+  assessments: Assessment[];
+  grades: Grade[];
+  remedials: RemedialRecord[];
+}> | null = null;
+
+export function invalidateReportCache(): void {
+  mergedSourcesCache = null;
+  mergedSourcesInflight = null;
+}
+
+if (typeof window !== 'undefined') {
+  const gw = window as unknown as { __simpelReportCacheListenerBound?: boolean };
+  if (!gw.__simpelReportCacheListenerBound) {
+    gw.__simpelReportCacheListenerBound = true;
+    window.addEventListener('simpel:remote-sync', (event: Event) => {
+      const keys = (event as CustomEvent<{ keys?: string[] }>).detail?.keys;
+      if (
+        !Array.isArray(keys) ||
+        keys.length === 0 ||
+        keys.includes('*') ||
+        keys.includes(STORAGE_KEYS.ASSESSMENTS) ||
+        keys.includes(STORAGE_KEYS.GRADES) ||
+        keys.includes(STORAGE_KEYS.REMEDIAL)
+      ) {
+        invalidateReportCache();
+      }
+    });
+  }
+}
+
+async function fetchMergedAssessmentSourcesUncached(): Promise<{
   assessments: Assessment[];
   grades: Grade[];
   remedials: RemedialRecord[];
@@ -118,95 +142,64 @@ async function loadMergedAssessmentSources(): Promise<{
   let remedials = [...localRemedials];
 
   try {
-    const [asmRes, grdRes, remRes] = await Promise.allSettled([
-      supabase.from('assessments').select('*, assignment:teaching_assignments(*)'),
+    const [asmRes, grdRes, remRes, asgs] = await Promise.all([
+      supabase.from('assessments').select('*'),
       supabase.from('grades').select('*'),
       supabase.from('remedial_records').select('*'),
+      academicService.getTeachingAssignments().catch(() => []),
     ]);
 
-    const firstSupabaseErr =
-      (asmRes.status === 'fulfilled' ? asmRes.value.error : asmRes.reason) ||
-      (grdRes.status === 'fulfilled' ? grdRes.value.error : grdRes.reason) ||
-      (remRes.status === 'fulfilled' ? remRes.value.error : remRes.reason) ||
-      null;
+    const firstSupabaseErr = asmRes.error || grdRes.error || remRes.error || null;
     reportSupabaseOutcome(firstSupabaseErr);
 
-    if (asmRes.status === 'fulfilled' && !asmRes.value.error && Array.isArray(asmRes.value.data)) {
+    const asgById = new Map(asgs.map((a) => [a.id, a]));
+
+    if (!asmRes.error && Array.isArray(asmRes.data)) {
+      const localById = new Map(localAssessments.map((a) => [a.id, a]));
       const byId = new Map<string, Assessment>();
       for (const a of localAssessments) byId.set(a.id, a);
-      for (const ra of asmRes.value.data as Assessment[]) {
-        const lm = byId.get(ra.id);
-        const rMs = normalizeTimeMs(ra.updated_at || ra.created_at);
-        const lMs = lm ? normalizeTimeMs(lm.updated_at || lm.created_at) : 0;
-        if (!lm || rMs > lMs) {
-          byId.set(ra.id, {
-            ...ra,
-            scope_key: ra.scope_key ?? lm?.scope_key ?? null,
-            assignment: ra.assignment || lm?.assignment,
-            updated_at: normalizeToUtcIso(ra.updated_at, ra.created_at),
-          });
-        }
+      for (const ra of asmRes.data as Assessment[]) {
+        const lm = localById.get(ra.id);
+        byId.set(ra.id, {
+          ...ra,
+          scope_key: ra.scope_key ?? lm?.scope_key ?? null,
+          assignment: ra.assignment || lm?.assignment || asgById.get(ra.assignment_id),
+        });
       }
       assessments = Array.from(byId.values());
     }
 
-    if (grdRes.status === 'fulfilled' && !grdRes.value.error && Array.isArray(grdRes.value.data)) {
-      let unsyncedKeys = new Set<string>();
-      try {
-        const rawUnsynced = localStorage.getItem('local_unsynced_grades_v1');
-        const parsed = rawUnsynced ? JSON.parse(rawUnsynced) : [];
-        if (Array.isArray(parsed)) unsyncedKeys = new Set(parsed.map(String));
-      } catch {
-        // ignore
-      }
-
+    if (!grdRes.error && Array.isArray(grdRes.data)) {
       const byKey = new Map<string, Grade>();
       for (const lg of localGrades) {
-        if (!lg || !lg.assessment_id || !lg.student_id) continue;
-        const k = `${lg.assessment_id}__${lg.student_id}`;
-        const prev = byKey.get(k);
-        if (!prev) {
-          byKey.set(k, lg);
-        } else {
-          const pMs = normalizeTimeMs(prev.updated_at || prev.created_at);
-          const cMs = normalizeTimeMs(lg.updated_at || lg.created_at);
-          if (cMs >= pMs) byKey.set(k, lg);
-        }
+        byKey.set(`${lg.assessment_id}__${lg.student_id}`, lg);
       }
-      for (const rg of grdRes.value.data as Grade[]) {
-        if (unsyncedKeys.has(`${rg.assessment_id}_${rg.student_id}`)) {
-          continue;
-        }
+      for (const rg of grdRes.data as Grade[]) {
         const key = `${rg.assessment_id}__${rg.student_id}`;
         const existing = byKey.get(key);
-        const normalizedRemote: Grade = {
-          ...rg,
-          score: Number(rg.score),
-          updated_at: normalizeToUtcIso(rg.updated_at, rg.created_at),
-        };
         if (!existing) {
-          byKey.set(key, normalizedRemote);
+          byKey.set(key, rg);
         } else {
-          const rMs = normalizeTimeMs(rg.updated_at || rg.created_at);
-          const lMs = normalizeTimeMs(existing.updated_at || existing.created_at);
+          const rMs = Date.parse(rg.updated_at || rg.created_at || '') || 0;
+          const lMs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
           if (rMs > lMs) {
-            byKey.set(key, normalizedRemote);
+            byKey.set(key, rg);
           }
         }
       }
       grades = Array.from(byKey.values());
     }
 
-    if (remRes.status === 'fulfilled' && !remRes.value.error && Array.isArray(remRes.value.data)) {
+    if (!remRes.error && Array.isArray(remRes.data)) {
       const byId = new Map<string, RemedialRecord>();
       for (const lr of localRemedials) byId.set(lr.id, lr);
-      for (const rr of remRes.value.data as RemedialRecord[]) {
+      for (const rr of remRes.data as RemedialRecord[]) {
         const existing = byId.get(rr.id);
         if (!existing) {
           byId.set(rr.id, rr);
         } else {
-          const rMs = normalizeTimeMs((rr as RemedialRecord & { updated_at?: string }).updated_at || rr.created_at);
-          const lMs = normalizeTimeMs((existing as RemedialRecord & { updated_at?: string }).updated_at || existing.created_at);
+          const rMs = Date.parse((rr as RemedialRecord & { updated_at?: string }).updated_at || rr.created_at || '') || 0;
+          const lMs = Date.parse((existing as RemedialRecord & { updated_at?: string }).updated_at || existing.created_at || '') || 0;
           if (rMs > lMs || (existing.score_after === null && rr.score_after !== null)) {
             byId.set(rr.id, {
               ...existing,
@@ -225,6 +218,31 @@ async function loadMergedAssessmentSources(): Promise<{
   }
 
   return { assessments, grades, remedials };
+}
+
+async function loadMergedAssessmentSources(): Promise<{
+  assessments: Assessment[];
+  grades: Grade[];
+  remedials: RemedialRecord[];
+}> {
+  const now = Date.now();
+  if (mergedSourcesCache && mergedSourcesCache.expiresAt > now) {
+    return mergedSourcesCache.value;
+  }
+  if (mergedSourcesInflight) {
+    return mergedSourcesInflight;
+  }
+  mergedSourcesInflight = fetchMergedAssessmentSourcesUncached()
+    .then((res) => {
+      mergedSourcesCache = { value: res, expiresAt: Date.now() + REPORT_SOURCE_CACHE_TTL_MS };
+      mergedSourcesInflight = null;
+      return res;
+    })
+    .catch((err) => {
+      mergedSourcesInflight = null;
+      throw err;
+    });
+  return mergedSourcesInflight;
 }
 
 function formatCompetencyPhrase(rawText: string, fallback: string): string {
@@ -405,18 +423,24 @@ export function resolveLedgerSlotForAssessment(
     return 'sasScore';
   }
 
-  const directMatch = scopeHint.match(/^LM[_\s-]*([1-4])$/);
+  const directMatch = scopeHint.match(/^LM[_\s-]*([1-4])(?:$|[^0-9])/);
   if (directMatch) {
     return `lm${directMatch[1]}` as LedgerSlot;
   }
 
   if (subjectId) {
-    const configured = curriculumWorkspaceService.getLingkupMateriList(subjectId, classLevel);
-    const presets = curriculumWorkspaceService.getPresetLingkupMateriTemplates(subjectId, classLevel);
-    const seen = new Set(configured.map((s) => s.scope_key));
-    const scopeList = [...configured, ...presets.filter((p) => !seen.has(p.scope_key))].filter(
-      (s) => !s.is_special_summative && s.scope_key !== 'STS' && s.scope_key !== 'SAS'
-    );
+    const configuredGanjil = curriculumWorkspaceService.getLingkupMateriList(subjectId, classLevel, 'Ganjil');
+    const configuredGenap = curriculumWorkspaceService.getLingkupMateriList(subjectId, classLevel, 'Genap');
+    const presetsGanjil = curriculumWorkspaceService.getPresetLingkupMateriTemplates(subjectId, classLevel, 'Ganjil');
+    const presetsGenap = curriculumWorkspaceService.getPresetLingkupMateriTemplates(subjectId, classLevel, 'Genap');
+    const mergedAll = [...configuredGanjil, ...configuredGenap, ...presetsGanjil, ...presetsGenap];
+    const seen = new Set<string>();
+    const scopeList = mergedAll.filter((s) => {
+      if (s.is_special_summative || s.scope_key === 'STS' || s.scope_key === 'SAS') return false;
+      if (seen.has(s.scope_key)) return false;
+      seen.add(s.scope_key);
+      return true;
+    });
 
     if (scopeHint) {
       const idx = scopeList.findIndex(
@@ -425,8 +449,8 @@ export function resolveLedgerSlotForAssessment(
           s.code.trim().toUpperCase() === scopeHint ||
           s.title.trim().toUpperCase() === scopeHint
       );
-      if (idx >= 0) {
-        return `lm${(idx % 4) + 1}` as LedgerSlot;
+      if (idx >= 0 && idx < 4) {
+        return `lm${idx + 1}` as LedgerSlot;
       }
     }
 
@@ -436,8 +460,8 @@ export function resolveLedgerSlotForAssessment(
           (s.code && titleHint.includes(s.code.trim().toUpperCase())) ||
           (s.title && s.title.trim().length >= 4 && titleHint.includes(s.title.trim().toUpperCase()))
       );
-      if (idxByTitle >= 0) {
-        return `lm${(idxByTitle % 4) + 1}` as LedgerSlot;
+      if (idxByTitle >= 0 && idxByTitle < 4) {
+        return `lm${idxByTitle + 1}` as LedgerSlot;
       }
     }
   }
@@ -455,7 +479,8 @@ export function resolveLedgerSlotForAssessment(
   if (/\bSTS\b|TENGAH SEMESTER/.test(titleHint)) return 'stsScore';
   if (/\bSAS\b|AKHIR SEMESTER/.test(titleHint)) return 'sasScore';
 
-  if (asm.assessment_type === 'Sumatif_Lingkup_Materi' || asm.assessment_type === 'Formatif') {
+  // Hanya fallback ke lm1 bila benar-benar belum ada unit/scope_key sama sekali pada Sumatif_Lingkup_Materi
+  if (!scopeHint && asm.assessment_type === 'Sumatif_Lingkup_Materi') {
     return 'lm1';
   }
 
@@ -579,12 +604,12 @@ export const reportService = {
 
         if (!result[g.student_id]) result[g.student_id] = {};
         const prevSlot = result[g.student_id][slot];
-        if (
+        const shouldTake =
           !prevSlot ||
-          (!prevSlot.isSummative && isSummative) ||
-          (prevSlot.isSummative === isSummative &&
-            normalizeTimeMs(updatedAt) >= normalizeTimeMs(prevSlot.updatedAt))
-        ) {
+          (isSummative && !prevSlot.isSummative) ||
+          (isSummative === prevSlot.isSummative &&
+            Date.parse(updatedAt) >= Date.parse(prevSlot.updatedAt));
+        if (shouldTake) {
           result[g.student_id][slot] = {
             score: effectiveScore,
             updatedAt,
@@ -661,11 +686,10 @@ export const reportService = {
           const slotManualAt =
             existing?.manualEditedSlots?.[slot] ??
             (existing?.manualEditedSlots ? undefined : existing?.manualEditedAt);
-          const entryMs = normalizeTimeMs(entry.updatedAt);
-          const manualMs = normalizeTimeMs(slotManualAt);
-          const shouldApply = slotManualAt
-            ? entryMs > manualMs
-            : currentVal === 0 || entryMs > 0;
+          const shouldApply =
+            currentVal === 0 ||
+            !slotManualAt ||
+            Date.parse(entry.updatedAt) > Date.parse(slotManualAt);
 
           if (shouldApply && currentVal !== entry.score) {
             if (slot === 'stsScore') sts = entry.score;
@@ -914,6 +938,7 @@ export const reportService = {
     subjectId: string,
     options?: { forceOverwrite?: boolean }
   ): Promise<{ updatedStudents: number; filledSlots: number }> {
+    invalidateReportCache();
     const key = `${classId}_${subjectId}`;
     if (options?.forceOverwrite) {
       const allStore = getLocal<Record<string, StudentSubjectScore[]>>(STORAGE_KEYS.SUBJECT_LEDGER, {});

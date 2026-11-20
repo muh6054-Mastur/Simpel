@@ -57,13 +57,28 @@ function getLocal<T>(key: string, fallback: T): T {
   }
 }
 
+const STORAGE_KEY_TO_CACHE_PREFIX: Record<string, string> = {
+  [STORAGE_KEYS.ACADEMIC_YEARS]: 'academic_years',
+  [STORAGE_KEYS.SEMESTERS]: 'semesters',
+  [STORAGE_KEYS.CLASSES]: 'classes',
+  [STORAGE_KEYS.STUDENTS]: 'students',
+  [STORAGE_KEYS.TEACHERS]: 'teachers',
+  [STORAGE_KEYS.SUBJECTS]: 'subjects',
+  [STORAGE_KEYS.ASSIGNMENTS]: 'assignments',
+  [STORAGE_KEYS.SETTINGS]: 'settings',
+  [STORAGE_KEYS.CLASS_MEMBERS]: 'class_members',
+  [STORAGE_KEYS.HOMEROOM_ASSIGNMENTS]: 'homerooms',
+  [STORAGE_KEYS.CLASS_OFFICIALS]: 'class_officials',
+};
+
 function setLocal<T>(key: string, value: T): void {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (err) {
     console.error(`Failed to store ${key}:`, err);
   } finally {
-    invalidateAcademicCache();
+    const prefix = STORAGE_KEY_TO_CACHE_PREFIX[key];
+    invalidateAcademicCache(prefix);
   }
 }
 
@@ -73,8 +88,8 @@ function emitAcademicSyncEvent(keys: string[]): void {
   }
 }
 
-// === CACHE TTL + IN-FLIGHT DEDUP UNTUK PERFORMA OPTIMAL ===
-const ACADEMIC_CACHE_TTL_MS = 2500;
+// === CACHE TTL + IN-FLIGHT DEDUP UNTUK PERFORMA OPTIMAL & HEMAT EGRESS ===
+const ACADEMIC_CACHE_TTL_MS = 45_000;
 const academicReadCache = new Map<string, { value: unknown; expiresAt: number }>();
 const academicInflightCache = new Map<string, Promise<unknown>>();
 
@@ -126,8 +141,29 @@ if (typeof window !== 'undefined') {
   const globalWindow = window as unknown as { __simpelAcademicCacheListenerBound?: boolean };
   if (!globalWindow.__simpelAcademicCacheListenerBound) {
     globalWindow.__simpelAcademicCacheListenerBound = true;
-    window.addEventListener('simpel:remote-sync', () => invalidateAcademicCache());
-    window.addEventListener('storage', () => invalidateAcademicCache());
+    window.addEventListener('simpel:remote-sync', (event: Event) => {
+      const keys = (event as CustomEvent<{ keys?: string[] }>).detail?.keys;
+      if (!Array.isArray(keys) || keys.length === 0 || keys.includes('*')) {
+        invalidateAcademicCache();
+        return;
+      }
+      for (const k of keys) {
+        const prefix = STORAGE_KEY_TO_CACHE_PREFIX[k];
+        if (prefix) {
+          invalidateAcademicCache(prefix);
+        } else if (k === USERS_SYNC_STORAGE_KEY) {
+          invalidateAcademicCache('teachers');
+        }
+      }
+    });
+    window.addEventListener('storage', (event: StorageEvent) => {
+      if (!event.key) {
+        invalidateAcademicCache();
+        return;
+      }
+      const prefix = STORAGE_KEY_TO_CACHE_PREFIX[event.key];
+      if (prefix) invalidateAcademicCache(prefix);
+    });
   }
 }
 
@@ -1815,7 +1851,7 @@ export const academicService = {
         try {
           const { data, error } = await supabase
             .from('homeroom_assignments')
-            .select('*, teacher:teachers(*), class:classes(*)');
+            .select('*');
           reportSupabaseOutcome(error);
           if (!error && Array.isArray(data) && data.length > 0) {
             const remoteList = data as HomeroomAssignment[];
@@ -2040,7 +2076,7 @@ export const academicService = {
         try {
           const { data, error } = await supabase
             .from('teaching_assignments')
-            .select('*, teacher:teachers(*), class:classes(*), subject:subjects(*)');
+            .select('*');
           reportSupabaseOutcome(error);
           if (!error && Array.isArray(data) && data.length > 0) {
             remoteAssignments = data as TeachingAssignment[];
@@ -2624,7 +2660,7 @@ export const academicService = {
         try {
           const { data, error } = await supabase
             .from('class_members')
-            .select('*, student:students(*), class:classes(*)');
+            .select('*');
           reportSupabaseOutcome(error);
           if (!error && Array.isArray(data) && data.length > 0) {
             const remoteMembers = data as ClassMember[];
@@ -2860,81 +2896,83 @@ export const academicService = {
 
   // === PERANGKAT KELAS (STRUKTUR ORGANISASI ROMBEL) ===
   async getClassOfficials(classId?: string): Promise<ClassOfficial[]> {
-    let rawList = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
+    const allOfficials = await cachedAcademicRead('class_officials', async () => {
+      let rawList = getLocal<ClassOfficial[]>(STORAGE_KEYS.CLASS_OFFICIALS, DEMO_CLASS_OFFICIALS);
 
-    if (isSupabaseAvailable()) {
-      try {
-        const { data, error } = await supabase
-          .from('class_officials')
-          .select('*, student:students(*), class:classes(*)')
-          .order('order_index', { ascending: true });
+      if (isSupabaseAvailable()) {
+        try {
+          const { data, error } = await supabase
+            .from('class_officials')
+            .select('*')
+            .order('order_index', { ascending: true });
 
-        if (!error) {
-          reportSupabaseOutcome(null);
-          if (Array.isArray(data) && data.length > 0) {
-            const mergedMap = new Map<string, ClassOfficial>();
-            let changedFromRemote = false;
+          if (!error) {
+            reportSupabaseOutcome(null);
+            if (Array.isArray(data) && data.length > 0) {
+              const mergedMap = new Map<string, ClassOfficial>();
+              let changedFromRemote = false;
 
-            for (const lo of rawList) {
-              mergedMap.set(lo.id, lo);
-            }
-            for (const ro of data as ClassOfficial[]) {
-              const existing = mergedMap.get(ro.id);
-              if (!existing) {
-                mergedMap.set(ro.id, ro);
-                changedFromRemote = true;
-              } else {
-                const remoteMs = Date.parse(ro.updated_at || ro.created_at || '') || 0;
-                const localMs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
-                if (remoteMs > localMs) {
+              for (const lo of rawList) {
+                mergedMap.set(lo.id, lo);
+              }
+              for (const ro of data as ClassOfficial[]) {
+                const existing = mergedMap.get(ro.id);
+                if (!existing) {
                   mergedMap.set(ro.id, ro);
                   changedFromRemote = true;
+                } else {
+                  const remoteMs = Date.parse(ro.updated_at || ro.created_at || '') || 0;
+                  const localMs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
+                  if (remoteMs > localMs) {
+                    mergedMap.set(ro.id, ro);
+                    changedFromRemote = true;
+                  }
                 }
               }
+              rawList = Array.from(mergedMap.values());
+              if (changedFromRemote) {
+                syncService.setLocalCacheSilently(
+                  STORAGE_KEYS.CLASS_OFFICIALS,
+                  JSON.stringify(rawList.map(({ student: _s, class: _c, ...rest }) => rest))
+                );
+              }
             }
-            rawList = Array.from(mergedMap.values());
-            if (changedFromRemote) {
-              syncService.setLocalCacheSilently(
-                STORAGE_KEYS.CLASS_OFFICIALS,
-                JSON.stringify(rawList.map(({ student: _s, class: _c, ...rest }) => rest))
-              );
+          } else {
+            const errCode = String(error.code || '');
+            const errMsg = String(error.message || '').toLowerCase();
+            // Abaikan diam-diam jika tabel class_officials belum dijalankan di SQL Editor Supabase
+            if (errCode !== '42P01' && errCode !== 'PGRST205' && !errMsg.includes('class_officials')) {
+              reportSupabaseOutcome(error);
             }
           }
-        } else {
-          const errCode = String(error.code || '');
-          const errMsg = String(error.message || '').toLowerCase();
-          // Abaikan diam-diam jika tabel class_officials belum dijalankan di SQL Editor Supabase
-          if (errCode !== '42P01' && errCode !== 'PGRST205' && !errMsg.includes('class_officials')) {
-            reportSupabaseOutcome(error);
-          }
+        } catch (err) {
+          console.warn('Supabase getClassOfficials fallback:', err);
         }
-      } catch (err) {
-        console.warn('Supabase getClassOfficials fallback:', err);
       }
-    }
 
-    const [students, classes] = await Promise.all([
-      this.getStudents(),
-      this.getClasses(),
-    ]);
+      const [students, classes] = await Promise.all([
+        this.getStudents(),
+        this.getClasses(),
+      ]);
 
-    const studentMap = new Map(students.map((s) => [s.id, s]));
-    const classMap = new Map(classes.map((c) => [c.id, c]));
+      const studentMap = new Map(students.map((s) => [s.id, s]));
+      const classMap = new Map(classes.map((c) => [c.id, c]));
 
-    const hydrated = rawList
-      .filter((o) => (students.length > 0 ? studentMap.has(o.student_id) : true))
-      .map((o) => ({
-        ...o,
-        student: studentMap.get(o.student_id) || o.student,
-        class: classMap.get(o.class_id) || o.class,
-      }))
-      .sort(
-        (a, b) =>
-          (a.order_index ?? 99) - (b.order_index ?? 99) ||
-          a.role_name.localeCompare(b.role_name, 'id')
-      );
+      return rawList
+        .filter((o) => (students.length > 0 ? studentMap.has(o.student_id) : true))
+        .map((o) => ({
+          ...o,
+          student: studentMap.get(o.student_id) || o.student,
+          class: classMap.get(o.class_id) || o.class,
+        }))
+        .sort(
+          (a, b) =>
+            (a.order_index ?? 99) - (b.order_index ?? 99) ||
+            a.role_name.localeCompare(b.role_name, 'id')
+        );
+    });
 
-    return classId ? hydrated.filter((o) => o.class_id === classId) : hydrated;
+    return classId ? allOfficials.filter((o) => o.class_id === classId) : allOfficials;
   },
 
   async upsertClassOfficial(payload: {

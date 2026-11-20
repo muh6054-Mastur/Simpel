@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useState, useMemo, useRef } from 'react';
 import { AuthUser } from '../types/auth.types';
 import { UserRole } from '../types/database.types';
 import {
@@ -7,6 +7,7 @@ import {
   logoutUser,
   getPersistedSession,
   fetchFullUserAccount,
+  clearAllRuntimeCaches,
 } from '../services/authService';
 import { supabase, isSupabaseConfigured, isSupabaseAvailable, reportSupabaseOutcome } from '../lib/supabaseClient';
 import { getDemoUsers, sortRolesByPriority } from '../services/userService';
@@ -37,6 +38,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const authActionRef = useRef<'login' | 'logout' | null>(null);
+  const lastCloudRefreshAtRef = useRef<number>(0);
 
   // Inisialisasi sesi awal dan listener Supabase Auth
   useEffect(() => {
@@ -72,11 +75,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           : local.profile,
       };
       if (JSON.stringify(nextUser) !== JSON.stringify(local)) {
-        try {
-          localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
-        } catch {
-          // ignore restricted storage
-        }
+        localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
       }
       return nextUser;
     };
@@ -140,9 +139,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (!mounted) return;
           if (event === 'SIGNED_IN' && session?.user) {
             if (!isSupabaseAvailable()) return;
+            // Hindari query ulang Supabase bila proses login baru saja menyelesaikan resolve akun
+            if (authActionRef.current === 'login') return;
             try {
               const fullUser = await fetchFullUserAccount(session.user.id, session.user.email);
               reportSupabaseOutcome();
+              lastCloudRefreshAtRef.current = Date.now();
               setUser(fullUser);
               setActiveRole(fullUser.activeRole);
             } catch (err: any) {
@@ -153,12 +155,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
             }
           } else if (event === 'SIGNED_OUT') {
+            clearAllRuntimeCaches();
             setUser(null);
-            try {
-              localStorage.removeItem('simpel_mi_session_user');
-            } catch {
-              // ignore restricted storage
-            }
+            setActiveRole('guru');
+            localStorage.removeItem('simpel_mi_session_user');
           }
         }
       );
@@ -175,44 +175,60 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const login = async (email: string, password?: string) => {
+    authActionRef.current = 'login';
     setIsLoading(true);
     setError(null);
+    clearAllRuntimeCaches();
     try {
       const loggedUser = await loginWithEmail(email, password);
+      lastCloudRefreshAtRef.current = Date.now();
       setUser(loggedUser);
       setActiveRole(loggedUser.activeRole);
     } catch (err: any) {
       setError(err?.message || 'Gagal masuk.');
       throw err;
     } finally {
+      window.setTimeout(() => {
+        if (authActionRef.current === 'login') authActionRef.current = null;
+      }, 600);
       setIsLoading(false);
     }
   };
 
   const loginAsDemo = async (target: 'admin' | 'kamad' | 'guru' | 'pjok') => {
+    authActionRef.current = 'login';
     setIsLoading(true);
     setError(null);
+    clearAllRuntimeCaches();
     try {
       const loggedUser = await loginDirectlyAs(target);
+      lastCloudRefreshAtRef.current = Date.now();
       setUser(loggedUser);
       setActiveRole(loggedUser.activeRole);
     } catch (err: any) {
       setError(err?.message || 'Gagal masuk demo.');
       throw err;
     } finally {
+      window.setTimeout(() => {
+        if (authActionRef.current === 'login') authActionRef.current = null;
+      }, 600);
       setIsLoading(false);
     }
   };
 
   const logout = async () => {
-    setIsLoading(true);
+    authActionRef.current = 'logout';
+    // Kosongkan sesi UI dan seluruh cache langsung tanpa menahan layar dengan loading screen
+    setUser(null);
+    setActiveRole('guru');
+    setError(null);
+    lastCloudRefreshAtRef.current = 0;
     try {
       await logoutUser();
-      setUser(null);
-      setError(null);
     } catch (err: any) {
       console.error('Logout error:', err);
     } finally {
+      authActionRef.current = null;
       setIsLoading(false);
     }
   };
@@ -225,18 +241,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActiveRole(role);
     const updated = { ...user, activeRole: role };
     setUser(updated);
-    try {
-      localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
-    } catch {
-      // ignore restricted storage
-    }
+    localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
   };
 
   const refreshProfile = async () => {
     if (!user) return;
     try {
-      if (isSupabaseAvailable()) {
+      // Gunakan cache TTL 15 detik agar sinkronisasi latar belakang tidak memicu query Supabase berulang kali
+      const canQueryCloud =
+        isSupabaseAvailable() && Date.now() - lastCloudRefreshAtRef.current > 15_000;
+      if (canQueryCloud) {
         try {
+          lastCloudRefreshAtRef.current = Date.now();
           const { data: { session }, error: sessErr } = await supabase.auth.getSession();
           if (sessErr) reportSupabaseOutcome(sessErr);
           if (!sessErr && session?.user?.id && session.user.id === user.id) {
@@ -258,11 +274,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
             if (JSON.stringify(nextUser) !== JSON.stringify(user)) {
               setUser(nextUser);
-              try {
-                localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
-              } catch {
-                // ignore restricted storage
-              }
+              localStorage.setItem('simpel_mi_session_user', JSON.stringify(nextUser));
             }
             return;
           }
@@ -328,11 +340,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       if (JSON.stringify(updated) !== JSON.stringify(user)) {
         setUser(updated);
-        try {
-          localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
-        } catch {
-          // ignore restricted storage
-        }
+        localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
       }
     } catch (err: any) {
       console.warn('Gagal memuat ulang profil:', err?.message);

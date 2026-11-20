@@ -12,7 +12,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { useGoogleDrive } from '../../context/GoogleDriveContext';
-import { fileStorageService, StoredDocumentFile, isRealDriveFileUrl } from '../../services/fileStorageService';
+import { fileStorageService, StoredDocumentFile, isRealDriveFileUrl, extractDriveFileIdFromUrl } from '../../services/fileStorageService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   DriveDocumentUploadModal,
@@ -141,8 +141,31 @@ export const CurriculumDocsPage: React.FC = () => {
 
   const handlePreviewStoredFile = async (doc: DocumentLink) => {
     let stored = doc.file_id ? await fileStorageService.getFileById(doc.file_id) : null;
-    if (!stored && doc.google_drive_url && isRealDriveFileUrl(doc.google_drive_url)) {
+    if (!stored) {
+      const hasDrive = isRealDriveFileUrl(doc.google_drive_url);
       stored = {
+        id: doc.file_id || `doc-preview-${doc.id}`,
+        name: doc.title,
+        size: 0,
+        mimeType: 'application/pdf',
+        category: doc.document_type,
+        uploadedBy: doc.teacher?.full_name || 'Guru Madrasah',
+        uploadedAt: doc.created_at || new Date().toISOString(),
+        googleDriveUrl: hasDrive ? doc.google_drive_url : undefined,
+        driveFileId: extractDriveFileIdFromUrl(doc.google_drive_url),
+      };
+    }
+    setPreviewDocState({ file: stored, docId: doc.id });
+  };
+
+  const handleDownloadStoredFile = async (doc: DocumentLink) => {
+    const stored = doc.file_id ? await fileStorageService.getFileById(doc.file_id) : null;
+    if (stored && (stored.dataUrl || isRealDriveFileUrl(stored.googleDriveUrl))) {
+      fileStorageService.downloadStoredFile(stored);
+      return;
+    }
+    if (isRealDriveFileUrl(doc.google_drive_url)) {
+      fileStorageService.downloadStoredFile({
         id: doc.file_id || doc.id,
         name: doc.title,
         size: 0,
@@ -151,23 +174,11 @@ export const CurriculumDocsPage: React.FC = () => {
         uploadedBy: doc.teacher?.full_name || 'Guru Madrasah',
         uploadedAt: doc.created_at || new Date().toISOString(),
         googleDriveUrl: doc.google_drive_url,
-      };
-    }
-    if (!stored) {
-      notify('Berkas fisik tidak ditemukan di penyimpanan lokal perangkat ini. Silakan buka via tautan Google Drive.', 'error');
+        driveFileId: extractDriveFileIdFromUrl(doc.google_drive_url),
+      });
       return;
     }
-    setPreviewDocState({ file: stored, docId: doc.id });
-  };
-
-  const handleDownloadStoredFile = async (doc: DocumentLink) => {
-    if (!doc.file_id) return;
-    const stored = await fileStorageService.getFileById(doc.file_id);
-    if (!stored) {
-      notify('Berkas fisik tidak ditemukan di penyimpanan lokal perangkat ini. Silakan unduh melalui Google Drive.', 'error');
-      return;
-    }
-    fileStorageService.downloadStoredFile(stored);
+    await handlePreviewStoredFile(doc);
   };
 
   const handleConfirmDelete = async () => {

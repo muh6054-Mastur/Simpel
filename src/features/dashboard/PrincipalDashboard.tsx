@@ -5,7 +5,12 @@ import {
   PrincipalDocumentSummary,
 } from '../../services/dashboardService';
 import { curriculumService } from '../../services/curriculumService';
-import { fileStorageService, StoredDocumentFile } from '../../services/fileStorageService';
+import {
+  extractDriveFileIdFromUrl,
+  fileStorageService,
+  isRealDriveFileUrl,
+  StoredDocumentFile,
+} from '../../services/fileStorageService';
 import { useAuth } from '../../context/AuthContext';
 import { StatCard } from '../../components/ui/StatCard';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
@@ -75,22 +80,54 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
     void loadData();
   }, []);
 
-  useRealtimeSync('*', () => {
-    void loadData();
-  });
-
-  const handleOpenFileAction = async (fileId: string | null, mode: 'preview' | 'download') => {
-    if (!fileId) return;
-    const stored = await fileStorageService.getFileById(fileId);
-    if (!stored) {
-      setToastMsg('Berkas fisik tidak ditemukan di penyimpanan lokal; silakan buka tautan Google Drive.');
-      setTimeout(() => setToastMsg(null), 4000);
-      return;
+  useRealtimeSync(
+    [
+      'simpel_teachers',
+      'simpel_students',
+      'simpel_classes',
+      'simpel_subjects',
+      'simpel_curriculum_documents',
+      'simpel_curriculum_reviews',
+      'simpel_teaching_journals',
+      'simpel_supervisions',
+      'simpel_drive_files_v1',
+    ],
+    () => {
+      void loadData();
     }
+  );
+
+  const handleOpenFileAction = async (
+    doc: PrincipalDocumentSummary,
+    mode: 'preview' | 'download'
+  ) => {
+    let stored = doc.fileId ? await fileStorageService.getFileById(doc.fileId) : null;
+    if (!stored) {
+      const hasDrive = isRealDriveFileUrl(doc.driveUrl);
+      const driveId = extractDriveFileIdFromUrl(doc.driveUrl);
+      stored = {
+        id: doc.fileId || `doc-preview-${doc.id}`,
+        name: doc.title,
+        size: 0,
+        mimeType: 'application/pdf',
+        category: doc.documentType,
+        description: `${doc.className} · ${doc.subjectName}`,
+        uploadedBy: doc.teacherName || 'Guru Madrasah',
+        uploadedAt: doc.submissionDate || new Date().toISOString(),
+        googleDriveUrl: hasDrive ? doc.driveUrl : undefined,
+        driveFileId: driveId,
+      };
+    }
+
     if (mode === 'preview') {
       setPreviewFile(stored);
-    } else {
+      return;
+    }
+
+    if (stored.dataUrl || isRealDriveFileUrl(stored.googleDriveUrl)) {
       fileStorageService.downloadStoredFile(stored);
+    } else {
+      setPreviewFile(stored);
     }
   };
 
@@ -341,12 +378,12 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                    {doc.fileId && (
+                    {(doc.fileId || isRealDriveFileUrl(doc.driveUrl)) && (
                       <>
                         <button
                           type="button"
-                          onClick={() => handleOpenFileAction(doc.fileId, 'preview')}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors"
+                          onClick={() => void handleOpenFileAction(doc, 'preview')}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors cursor-pointer"
                           title="Preview dokumen layar penuh"
                         >
                           <Eye className="w-3 h-3" />
@@ -354,23 +391,25 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleOpenFileAction(doc.fileId, 'download')}
-                          className="inline-flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors"
+                          onClick={() => void handleOpenFileAction(doc, 'download')}
+                          className="inline-flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer"
                           title="Unduh berkas"
                         >
                           <Download className="w-3 h-3" />
                         </button>
                       </>
                     )}
-                    <a
-                      href={doc.driveUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                    >
-                      <span>Buka Drive</span>
-                      <ExternalLink className="w-3 h-3 text-slate-400" />
-                    </a>
+                    {isRealDriveFileUrl(doc.driveUrl) && (
+                      <a
+                        href={doc.driveUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                      >
+                        <span>Buka Drive</span>
+                        <ExternalLink className="w-3 h-3 text-slate-400" />
+                      </a>
+                    )}
                     <button
                       type="button"
                       onClick={() => handleOpenReviewModal(doc, 'Disetujui')}
@@ -461,25 +500,27 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
               <p className="font-bold text-slate-900 text-sm">{reviewDoc.title}</p>
               <p className="text-slate-600">Penyusun: {reviewDoc.teacherName}</p>
               <div className="flex items-center gap-2 pt-1">
-                {reviewDoc.fileId && (
+                {(reviewDoc.fileId || isRealDriveFileUrl(reviewDoc.driveUrl)) && (
                   <button
                     type="button"
-                    onClick={() => handleOpenFileAction(reviewDoc.fileId, 'preview')}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-800 text-white font-bold text-[11px] hover:bg-emerald-900"
+                    onClick={() => void handleOpenFileAction(reviewDoc, 'preview')}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-800 text-white font-bold text-[11px] hover:bg-emerald-900 cursor-pointer"
                   >
                     <Eye className="w-3 h-3" />
                     <span>Preview Dokumen</span>
                   </button>
                 )}
-                <a
-                  href={reviewDoc.driveUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-emerald-300 text-emerald-800 font-semibold text-[11px] hover:bg-emerald-50"
-                >
-                  <span>Buka di Google Drive</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
+                {isRealDriveFileUrl(reviewDoc.driveUrl) && (
+                  <a
+                    href={reviewDoc.driveUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-emerald-300 text-emerald-800 font-semibold text-[11px] hover:bg-emerald-50"
+                  >
+                    <span>Buka di Google Drive</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
               </div>
             </div>
 

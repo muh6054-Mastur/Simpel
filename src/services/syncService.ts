@@ -65,44 +65,6 @@ const nativeRemoveItem = Storage.prototype.removeItem;
 // Batas aman payload WebSocket agar tidak diputus reverse proxy (128 KB)
 const WS_MAX_FRAME_BYTES = 128 * 1024;
 
-const KEY_UPDATED_AT_STORAGE_KEY = 'local_sync_key_updated_at_v1';
-
-const TABLE_TO_SYNC_KEYS: Record<string, string[]> = {
-  assessments: ['simpel_assessments'],
-  grades: ['simpel_grades'],
-  remedial_records: ['simpel_remedial'],
-  enrichment_records: ['simpel_enrichment'],
-  students: ['simpel_students'],
-  classes: ['simpel_classes'],
-  class_members: ['simpel_class_members'],
-  class_officials: ['simpel_class_officials'],
-  subjects: ['simpel_subjects'],
-  teachers: ['simpel_teachers'],
-  teaching_assignments: ['simpel_assignments'],
-  homeroom_assignments: ['simpel_homeroom_assignments'],
-  academic_years: ['simpel_academic_years'],
-  semesters: ['simpel_semesters'],
-  system_settings: ['simpel_settings'],
-  teaching_journals: ['simpel_teaching_journals'],
-  student_attendance: ['simpel_attendance'],
-  guidance_records: ['simpel_guidance_records'],
-  kokurikuler_themes: ['simpel_kokurikuler_themes'],
-  kokurikuler_activities: ['simpel_kokurikuler_activities'],
-  kokurikuler_assessments: ['simpel_kokurikuler_assessments'],
-  supervisions: ['simpel_supervisions'],
-  curriculum_documents: ['simpel_curriculum_documents'],
-};
-
-function normalizeSyncTimeMs(value?: string | null): number {
-  if (!value) return 0;
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) return 0;
-  if (ms > Date.now() + 5 * 60_000) {
-    return ms - 7 * 3600_000;
-  }
-  return ms;
-}
-
 class RealtimeSyncService {
   private clientId = getOrCreateClientId();
   private ws: WebSocket | null = null;
@@ -124,7 +86,6 @@ class RealtimeSyncService {
   >();
   private inMemoryFallback = new Map<string, string>();
   private keyUpdatedAt = new Map<string, string>();
-  private recentLocalWriteAt = new Map<string, number>();
   private flushTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
@@ -134,6 +95,10 @@ class RealtimeSyncService {
   private heartbeatTimer: number | null = null;
   private deltaPollTimer: number | null = null;
   private lastKnownValues = new Map<string, string | null>();
+  private inFlightCloudKeys = new Set<string>();
+  private lastCloudSyncedValueByKey = new Map<string, string>();
+  private lastCloudPullAt = 0;
+  private lastSyncAllAt = 0;
   private cloudPullInFlight = false;
   private deferredKeysInFlight = new Set<string>();
   private cloudConnected = false;
@@ -144,7 +109,6 @@ class RealtimeSyncService {
   private statusListeners = new Set<(snap: SyncStatusSnapshot) => void>();
 
   constructor() {
-    this.loadPersistedKeyUpdatedAt();
     this.setupBroadcastChannel();
     subscribeSupabaseHealth((snap) => {
       const changed =
@@ -155,45 +119,6 @@ class RealtimeSyncService {
         this.emitStatus();
       }
     });
-  }
-
-  private loadPersistedKeyUpdatedAt(): void {
-    if (typeof window === 'undefined') return;
-    try {
-      const raw = nativeGetItem.call(window.localStorage, KEY_UPDATED_AT_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        for (const [k, v] of Object.entries(parsed)) {
-          if (typeof v === 'string' && v) {
-            this.keyUpdatedAt.set(k, v);
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  private persistKeyUpdatedAt(): void {
-    if (typeof window === 'undefined') return;
-    try {
-      const obj: Record<string, string> = {};
-      this.keyUpdatedAt.forEach((v, k) => {
-        obj[k] = v;
-      });
-      nativeSetItem.call(window.localStorage, KEY_UPDATED_AT_STORAGE_KEY, JSON.stringify(obj));
-    } catch {
-      // ignore
-    }
-  }
-
-  private recordKeyUpdatedAt(key: string, updatedAt: string, markLocalWrite = false): void {
-    this.keyUpdatedAt.set(key, updatedAt);
-    if (markLocalWrite) {
-      this.recentLocalWriteAt.set(key, Date.now());
-    }
-    this.persistKeyUpdatedAt();
   }
 
   private isMaskedPassword(pw: unknown): boolean {
@@ -265,165 +190,6 @@ class RealtimeSyncService {
     }
   }
 
-  private mergeRemoteGradesJson(localJson: string, remoteJson: string, remoteKeyUpdatedAt?: string): string {
-    try {
-      const remoteArr = JSON.parse(remoteJson);
-      const localArr = JSON.parse(localJson);
-      if (!Array.isArray(remoteArr) || !Array.isArray(localArr)) return remoteJson;
-
-      let unsyncedKeys = new Set<string>();
-      try {
-        const rawUnsynced = nativeGetItem.call(window.localStorage, 'local_unsynced_grades_v1');
-        const parsed = rawUnsynced ? JSON.parse(rawUnsynced) : [];
-        if (Array.isArray(parsed)) unsyncedKeys = new Set(parsed.map(String));
-      } catch {
-        // ignore
-      }
-
-      const remoteKeyMs = normalizeSyncTimeMs(remoteKeyUpdatedAt);
-      const mergedMap = new Map<string, any>();
-
-      for (const lg of localArr) {
-        if (!lg || !lg.assessment_id || !lg.student_id) continue;
-        const k = `${lg.assessment_id}_${lg.student_id}`;
-        const prev = mergedMap.get(k);
-        if (!prev) {
-          mergedMap.set(k, lg);
-        } else {
-          const pMs = normalizeSyncTimeMs(prev.updated_at || prev.created_at);
-          const cMs = normalizeSyncTimeMs(lg.updated_at || lg.created_at);
-          if (cMs >= pMs) mergedMap.set(k, lg);
-        }
-      }
-
-      const remoteSeen = new Set<string>();
-      for (const rg of remoteArr) {
-        if (!rg || !rg.assessment_id || !rg.student_id) continue;
-        const k = `${rg.assessment_id}_${rg.student_id}`;
-        remoteSeen.add(k);
-        if (unsyncedKeys.has(k)) continue;
-
-        const existing = mergedMap.get(k);
-        if (!existing) {
-          mergedMap.set(k, rg);
-        } else {
-          const rMs = normalizeSyncTimeMs(rg.updated_at || rg.created_at);
-          const lMs = normalizeSyncTimeMs(existing.updated_at || existing.created_at);
-          if (rMs > lMs) {
-            mergedMap.set(k, rg);
-          }
-        }
-      }
-
-      // Hapus entri lama yang hanya ada di lokal HANYA jika remote jelas lebih baru dan tidak ditandai unsynced
-      const localKeyMs = normalizeSyncTimeMs(this.keyUpdatedAt.get('simpel_grades'));
-      if (remoteKeyMs > 0 && remoteKeyMs > localKeyMs) {
-        for (const [k, val] of Array.from(mergedMap.entries())) {
-          if (!remoteSeen.has(k) && !unsyncedKeys.has(k)) {
-            const itemMs = normalizeSyncTimeMs(val.updated_at || val.created_at);
-            if (itemMs <= remoteKeyMs && remoteArr.length > 0) {
-              mergedMap.delete(k);
-            }
-          }
-        }
-      }
-
-      return JSON.stringify(Array.from(mergedMap.values()));
-    } catch {
-      return remoteJson;
-    }
-  }
-
-  private mergeRemoteAssessmentsJson(localJson: string, remoteJson: string, remoteKeyUpdatedAt?: string): string {
-    try {
-      const remoteArr = JSON.parse(remoteJson);
-      const localArr = JSON.parse(localJson);
-      if (!Array.isArray(remoteArr) || !Array.isArray(localArr)) return remoteJson;
-
-      const remoteKeyMs = normalizeSyncTimeMs(remoteKeyUpdatedAt);
-      const mergedMap = new Map<string, any>();
-
-      for (const la of localArr) {
-        if (la && la.id) mergedMap.set(String(la.id), la);
-      }
-
-      const remoteSeen = new Set<string>();
-      for (const ra of remoteArr) {
-        if (!ra || !ra.id) continue;
-        const id = String(ra.id);
-        remoteSeen.add(id);
-        const existing = mergedMap.get(id);
-        if (!existing) {
-          mergedMap.set(id, ra);
-        } else {
-          const rMs = normalizeSyncTimeMs(ra.updated_at || ra.created_at);
-          const lMs = normalizeSyncTimeMs(existing.updated_at || existing.created_at);
-          if (rMs > lMs) {
-            mergedMap.set(id, {
-              ...ra,
-              scope_key: ra.scope_key ?? existing.scope_key ?? null,
-            });
-          }
-        }
-      }
-
-      const localKeyMs = normalizeSyncTimeMs(this.keyUpdatedAt.get('simpel_assessments'));
-      if (remoteKeyMs > 0 && remoteKeyMs > localKeyMs) {
-        for (const [id, val] of Array.from(mergedMap.entries())) {
-          if (!remoteSeen.has(id)) {
-            const itemMs = normalizeSyncTimeMs(val.updated_at || val.created_at);
-            if (itemMs <= remoteKeyMs) {
-              mergedMap.delete(id);
-            }
-          }
-        }
-      }
-
-      return JSON.stringify(Array.from(mergedMap.values()));
-    } catch {
-      return remoteJson;
-    }
-  }
-
-  private mergeRemoteLedgerJson(localJson: string, remoteJson: string, remoteKeyUpdatedAt?: string): string {
-    try {
-      const remoteObj = JSON.parse(remoteJson);
-      const localObj = JSON.parse(localJson);
-      if (!remoteObj || typeof remoteObj !== 'object' || !localObj || typeof localObj !== 'object') {
-        return remoteJson;
-      }
-      const remoteKeyMs = normalizeSyncTimeMs(remoteKeyUpdatedAt);
-      const merged: Record<string, any[]> = { ...localObj };
-
-      for (const [subjectKey, remoteRows] of Object.entries(remoteObj)) {
-        if (!Array.isArray(remoteRows)) continue;
-        const localRows = Array.isArray(merged[subjectKey]) ? merged[subjectKey] : [];
-        if (localRows.length === 0) {
-          merged[subjectKey] = remoteRows;
-          continue;
-        }
-        const localByStudent = new Map<string, any>(
-          localRows.filter((r) => r?.studentId).map((r) => [String(r.studentId), r])
-        );
-        const nextRows = remoteRows.map((rr: any) => {
-          const lr = rr?.studentId ? localByStudent.get(String(rr.studentId)) : undefined;
-          if (!lr) return rr;
-          const localEditMs = normalizeSyncTimeMs(lr.manualEditedAt);
-          const remoteEditMs = normalizeSyncTimeMs(rr.manualEditedAt);
-          if (localEditMs > Math.max(remoteEditMs, remoteKeyMs)) {
-            return lr;
-          }
-          return rr;
-        });
-        merged[subjectKey] = nextRows;
-      }
-
-      return JSON.stringify(merged);
-    } catch {
-      return remoteJson;
-    }
-  }
-
   private snapshotLocalValues(): void {
     try {
       for (let i = 0; i < window.localStorage.length; i++) {
@@ -463,12 +229,7 @@ class RealtimeSyncService {
     const self = this;
 
     Storage.prototype.getItem = function (key: string): string | null {
-      let val: string | null = null;
-      try {
-        val = nativeGetItem.call(this, key);
-      } catch {
-        val = null;
-      }
+      const val = nativeGetItem.call(this, key);
       if (val === null && this === window.localStorage && self.inMemoryFallback.has(key)) {
         return self.inMemoryFallback.get(key) ?? null;
       }
@@ -539,11 +300,7 @@ class RealtimeSyncService {
     };
 
     Storage.prototype.removeItem = function (key: string) {
-      try {
-        nativeRemoveItem.call(this, key);
-      } catch {
-        // ignore restricted storage errors
-      }
+      nativeRemoveItem.call(this, key);
       if (this === window.localStorage) {
         self.inMemoryFallback.delete(key);
       }
@@ -560,7 +317,7 @@ class RealtimeSyncService {
 
   private enqueueMutation(key: string, value: string | null): void {
     const updatedAt = new Date().toISOString();
-    this.recordKeyUpdatedAt(key, updatedAt, true);
+    this.keyUpdatedAt.set(key, updatedAt);
     this.pendingMutations.set(key, { value, updatedAt });
     this.emitStatus();
 
@@ -632,6 +389,10 @@ class RealtimeSyncService {
   ): Promise<void> {
     if (!isSupabaseAvailable() || batch.length === 0) return;
 
+    for (const m of batch) {
+      this.inFlightCloudKeys.add(m.key);
+    }
+
     try {
       const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
       if (sessionErr) {
@@ -686,6 +447,9 @@ class RealtimeSyncService {
         const { error: smallErr } = await supabase.from('app_sync_state').upsert(smallRows, { onConflict: 'key' });
         reportSupabaseOutcome(smallErr);
         if (!smallErr) {
+          smallRows.forEach((r) => {
+            if (r.value !== null) this.lastCloudSyncedValueByKey.set(r.key, r.value);
+          });
           this.cloudConnected = true;
           this.lastSyncedAt = new Date().toISOString();
           this.updateConnectionStatus();
@@ -696,6 +460,7 @@ class RealtimeSyncService {
             const { error: singleErr } = await supabase.from('app_sync_state').upsert(row, { onConflict: 'key' });
             reportSupabaseOutcome(singleErr);
             if (!singleErr) {
+              if (row.value !== null) this.lastCloudSyncedValueByKey.set(row.key, row.value);
               this.cloudConnected = true;
               this.lastSyncedAt = new Date().toISOString();
               this.updateConnectionStatus();
@@ -708,6 +473,7 @@ class RealtimeSyncService {
         const { error: lrErr } = await supabase.from('app_sync_state').upsert(lr, { onConflict: 'key' });
         reportSupabaseOutcome(lrErr);
         if (!lrErr) {
+          if (lr.value !== null) this.lastCloudSyncedValueByKey.set(lr.key, lr.value);
           this.cloudConnected = true;
           this.lastSyncedAt = new Date().toISOString();
           this.updateConnectionStatus();
@@ -716,6 +482,10 @@ class RealtimeSyncService {
       }
     } catch (err) {
       reportSupabaseOutcome(err);
+    } finally {
+      for (const m of batch) {
+        this.inFlightCloudKeys.delete(m.key);
+      }
     }
   }
 
@@ -804,38 +574,23 @@ class RealtimeSyncService {
     try {
       for (const [key, entry] of Object.entries(entries)) {
         if (!isSyncedKey(key)) continue;
-        // Skip overwriting key if user has an un-flushed newer local mutation for this exact key
-        if (this.pendingMutations.has(key)) continue;
+        // Skip overwriting key if user has an un-flushed or in-flight local mutation for this exact key
+        if (this.pendingMutations.has(key) || this.inFlightCloudKeys.has(key)) continue;
 
         if (entry?.updatedAt) {
-          this.recordKeyUpdatedAt(key, entry.updatedAt, false);
-        }
-
-        let currentLocal: string | null = null;
-        try {
-          currentLocal = nativeGetItem.call(window.localStorage, key) ?? this.inMemoryFallback.get(key) ?? null;
-        } catch {
-          currentLocal = this.inMemoryFallback.get(key) ?? null;
+          this.keyUpdatedAt.set(key, entry.updatedAt);
         }
 
         let remoteValue = entry?.value ?? null;
         if (key === 'simpel_users_cache_v2' && remoteValue) {
           remoteValue = this.mergeCloudUsersJsonWithLocal(remoteValue);
-        } else if (key === 'simpel_grades' && remoteValue && currentLocal) {
-          remoteValue = this.mergeRemoteGradesJson(currentLocal, remoteValue, entry?.updatedAt);
-        } else if (key === 'simpel_assessments' && remoteValue && currentLocal) {
-          remoteValue = this.mergeRemoteAssessmentsJson(currentLocal, remoteValue, entry?.updatedAt);
-        } else if (key === 'simpel_subject_ledger_v1' && remoteValue && currentLocal) {
-          remoteValue = this.mergeRemoteLedgerJson(currentLocal, remoteValue, entry?.updatedAt);
         }
+
+        const currentLocal = nativeGetItem.call(window.localStorage, key) ?? this.inMemoryFallback.get(key) ?? null;
 
         if (remoteValue === null) {
           if (currentLocal !== null) {
-            try {
-              nativeRemoveItem.call(window.localStorage, key);
-            } catch {
-              // ignore
-            }
+            nativeRemoveItem.call(window.localStorage, key);
             this.inMemoryFallback.delete(key);
             this.lastKnownValues.set(key, null);
             changedKeys.push(key);
@@ -916,7 +671,6 @@ class RealtimeSyncService {
       }
       if (isSyncedKey(key)) {
         this.lastKnownValues.set(key, strVal);
-        this.recordKeyUpdatedAt(key, new Date().toISOString(), true);
       }
     } finally {
       this.isApplyingRemote = prev;
@@ -953,26 +707,18 @@ class RealtimeSyncService {
   public async pullFromSupabaseCloud(options?: { fastOnly?: boolean; hydrateLocalServer?: boolean; force?: boolean }): Promise<boolean> {
     if (options?.force) {
       resetSupabaseCircuitBreaker();
+    } else if (Date.now() - this.lastCloudPullAt < 10_000) {
+      return false;
     }
     if (!isSupabaseAvailable() || this.cloudPullInFlight) return false;
     this.cloudPullInFlight = true;
+    this.lastCloudPullAt = Date.now();
 
     try {
       // Tahap 1: Cek metadata ringan saja (key, revision, updated_at) agar hemat kuota egres Supabase
-      const metaQueryPromise = supabase
+      const { data: metaRows, error: metaErr } = await supabase
         .from('app_sync_state')
         .select('key, revision, updated_at');
-
-      const metaResult = options?.fastOnly
-        ? await Promise.race([
-            metaQueryPromise,
-            new Promise<{ data: null; error: { message: string } }>((resolve) =>
-              window.setTimeout(() => resolve({ data: null, error: { message: 'Supabase fast metadata timeout' } }), 3500)
-            ),
-          ])
-        : await metaQueryPromise;
-
-      const { data: metaRows, error: metaErr } = metaResult as { data: any; error: any };
 
       reportSupabaseOutcome(metaErr);
       if (metaErr) {
@@ -992,6 +738,7 @@ class RealtimeSyncService {
 
       for (const meta of metaRows as Array<{ key: string; revision: number; updated_at: string }>) {
         if (!isSyncedKey(meta.key)) continue;
+        if (this.pendingMutations.has(meta.key) || this.inFlightCloudKeys.has(meta.key)) continue;
         const localCurrent =
           nativeGetItem.call(window.localStorage, meta.key) ?? this.inMemoryFallback.get(meta.key) ?? null;
         const localUpdatedAt = this.keyUpdatedAt.get(meta.key);
@@ -1129,8 +876,10 @@ class RealtimeSyncService {
     }
   }
 
-  public async syncAllLocalToCloud(): Promise<void> {
+  public async syncAllLocalToCloud(force = false): Promise<void> {
     if (!isSupabaseAvailable() || typeof window === 'undefined') return;
+    if (!force && Date.now() - this.lastSyncAllAt < 15_000) return;
+    this.lastSyncAllAt = Date.now();
     try {
       const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
       if (sessionErr) {
@@ -1158,6 +907,10 @@ class RealtimeSyncService {
         // Jangan pernah menimpa cloud dengan array/objek kosong hasil inisialisasi perangkat baru
         if (val === '[]' || val === '{}') return;
         if (!hasAuthUser && (key === 'simpel_users_cache_v2' || key === 'simpel_settings')) return;
+        const compareVal = key === 'simpel_users_cache_v2' ? this.sanitizeUsersJsonForCloud(val) : val;
+        if (!force && this.lastCloudSyncedValueByKey.get(key) === compareVal) {
+          return;
+        }
         batch.push({
           key,
           value: val,
@@ -1178,11 +931,10 @@ class RealtimeSyncService {
     this.isPulling = true;
 
     const useFast = options?.priorityFast ?? (sinceRevision === 0);
-    let timeout: number | undefined;
 
     try {
       const controller = new AbortController();
-      timeout = window.setTimeout(() => controller.abort(), useFast ? 2500 : 12000);
+      const timeout = window.setTimeout(() => controller.abort(), useFast ? 6000 : 12000);
       const params = new URLSearchParams();
       if (sinceRevision > 0) params.set('since', String(sinceRevision));
       if (useFast) params.set('priority', 'fast');
@@ -1192,6 +944,7 @@ class RealtimeSyncService {
         cache: 'no-store',
         signal: controller.signal,
       });
+      window.clearTimeout(timeout);
 
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('application/json')) {
@@ -1259,9 +1012,6 @@ class RealtimeSyncService {
       this.updateConnectionStatus();
       console.warn('[Sync] Pull skipped/retried:', err);
     } finally {
-      if (timeout !== undefined) {
-        window.clearTimeout(timeout);
-      }
       this.isPulling = false;
     }
   }
@@ -1504,7 +1254,7 @@ class RealtimeSyncService {
       const hasLiveStream =
         this.ws?.readyState === WebSocket.OPEN ||
         (typeof EventSource !== 'undefined' && this.sse?.readyState === EventSource.OPEN);
-      const nextInterval = hasLiveStream ? 30000 : 10000;
+      const nextInterval = hasLiveStream ? 90_000 : this.cloudConnected ? 60_000 : 30_000;
       this.deltaPollTimer = window.setTimeout(() => {
         void tick();
       }, nextInterval);
@@ -1512,7 +1262,7 @@ class RealtimeSyncService {
 
     this.deltaPollTimer = window.setTimeout(() => {
       void tick();
-    }, 5000);
+    }, 15_000);
   }
 
   private scheduleReconnect(): void {
@@ -1525,58 +1275,62 @@ class RealtimeSyncService {
     }, delay);
   }
 
+  private mapSupabaseTableToKeys(table?: string): string[] {
+    const map: Record<string, string[]> = {
+      teachers: ['simpel_teachers'],
+      students: ['simpel_students'],
+      classes: ['simpel_classes'],
+      subjects: ['simpel_subjects'],
+      teaching_assignments: ['simpel_assignments'],
+      homeroom_assignments: ['simpel_homeroom_assignments'],
+      class_members: ['simpel_class_members'],
+      class_officials: ['simpel_class_officials'],
+      academic_years: ['simpel_academic_years'],
+      semesters: ['simpel_semesters'],
+      system_settings: ['simpel_settings'],
+      assessments: ['simpel_assessments'],
+      grades: ['simpel_grades', 'simpel_subject_ledger_v1'],
+      remedial_records: ['simpel_remedial', 'simpel_subject_ledger_v1'],
+      enrichment_records: ['simpel_enrichment'],
+      final_grades: ['simpel_subject_ledger_v1'],
+      document_links: ['simpel_curriculum_documents'],
+      document_reviews: ['simpel_document_reviews'],
+      teaching_journals: ['simpel_teaching_journals'],
+      supervision_records: ['simpel_supervision_records'],
+      kokurikuler_items: ['simpel_kokurikuler_items'],
+      student_guidance_records: ['simpel_student_guidance'],
+      student_attendance: ['simpel_attendance'],
+    };
+    return (table && map[table]) || ['*'];
+  }
+
   private initSupabaseRealtimeBridge(): void {
     if (!isSupabaseAvailable()) return;
     try {
-      let bufferedKeys = new Set<string>();
-      let broadcastTimer: number | null = null;
-      let appSyncPullTimer: number | null = null;
-
-      const flushBufferedRealtime = () => {
-        broadcastTimer = null;
-        if (bufferedKeys.size === 0) return;
-        const keysToEmit = Array.from(bufferedKeys);
-        bufferedKeys.clear();
-        window.dispatchEvent(
-          new CustomEvent('simpel:remote-sync', {
-            detail: { keys: keysToEmit, source: 'supabase-realtime' },
-          })
-        );
-      };
-
       supabase
         .channel('simpel-global-db-sync')
         .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
           if (!isSupabaseAvailable()) return;
           if (payload.table === 'app_sync_state') {
-            if (appSyncPullTimer !== null) window.clearTimeout(appSyncPullTimer);
-            appSyncPullTimer = window.setTimeout(() => {
-              appSyncPullTimer = null;
-              void this.pullFromSupabaseCloud({
-                fastOnly: true,
-                hydrateLocalServer: !this.localBackendUnsupported,
-              });
-            }, 350);
+            const changedKey =
+              (payload.new as { key?: string } | null)?.key ||
+              (payload.old as { key?: string } | null)?.key;
+            if (changedKey && (this.pendingMutations.has(changedKey) || this.inFlightCloudKeys.has(changedKey))) {
+              return;
+            }
+            // pullFromSupabaseCloud will emit simpel:remote-sync ONLY for keys that genuinely changed
+            void this.pullFromSupabaseCloud({
+              fastOnly: true,
+              hydrateLocalServer: !this.localBackendUnsupported,
+              force: true,
+            });
             return;
           }
-
-          const mappedKeys = TABLE_TO_SYNC_KEYS[payload.table] || ['*'];
-          const nowMs = Date.now();
-          let anyAdded = false;
-          for (const k of mappedKeys) {
-            if (k !== '*') {
-              const recentAt = this.recentLocalWriteAt.get(k) || 0;
-              if (nowMs - recentAt < 3000) {
-                continue;
-              }
-            }
-            bufferedKeys.add(k);
-            anyAdded = true;
-          }
-          if (!anyAdded) return;
-
-          if (broadcastTimer !== null) window.clearTimeout(broadcastTimer);
-          broadcastTimer = window.setTimeout(flushBufferedRealtime, 450);
+          window.dispatchEvent(
+            new CustomEvent('simpel:remote-sync', {
+              detail: { keys: this.mapSupabaseTableToKeys(payload.table), table: payload.table },
+            })
+          );
         })
         .subscribe((subStatus) => {
           if (subStatus === 'SUBSCRIBED') {
@@ -1586,12 +1340,11 @@ class RealtimeSyncService {
         });
 
       supabase.auth.onAuthStateChange((event) => {
-        if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && isSupabaseAvailable()) {
+        if (event === 'SIGNED_IN' && isSupabaseAvailable()) {
           void this.syncAllLocalToCloud();
           void this.pullFromSupabaseCloud({
             fastOnly: false,
             hydrateLocalServer: !this.localBackendUnsupported,
-            force: true,
           });
         }
       });
@@ -1683,7 +1436,7 @@ class RealtimeSyncService {
     await this.flushMutations();
     await this.pullFromServer(0, { priorityFast: false });
     if (isSupabaseAvailable()) {
-      await this.syncAllLocalToCloud();
+      await this.syncAllLocalToCloud(true);
       await this.pullFromSupabaseCloud({
         fastOnly: false,
         hydrateLocalServer: !this.localBackendUnsupported,

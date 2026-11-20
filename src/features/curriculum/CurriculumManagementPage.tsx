@@ -5,7 +5,7 @@ import { useGoogleDrive } from '../../context/GoogleDriveContext';
 import { academicService } from '../../services/academicService';
 import { curriculumService } from '../../services/curriculumService';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
-import { fileStorageService, StoredDocumentFile, isRealDriveFileUrl } from '../../services/fileStorageService';
+import { fileStorageService, StoredDocumentFile, isRealDriveFileUrl, extractDriveFileIdFromUrl } from '../../services/fileStorageService';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import { DriveDocumentUploadModal } from '../../components/curriculum/DriveDocumentUploadModal';
@@ -608,25 +608,24 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
     itemId?: string
   ) => {
     let stored = fileId ? await fileStorageService.getFileById(fileId) : null;
-    if (!stored && fallbackDriveUrl && isRealDriveFileUrl(fallbackDriveUrl)) {
+    if (!stored) {
+      const hasDrive = isRealDriveFileUrl(fallbackDriveUrl);
       stored = {
-        id: fileId || `drive-${Date.now()}`,
-        name: fallbackTitle || 'Dokumen Google Drive',
+        id: fileId || `drive-${itemId || Date.now()}`,
+        name: fallbackTitle || 'Dokumen Perangkat Pembelajaran',
         size: 0,
         mimeType: 'application/pdf',
         category: DOC_META_BY_TAB[itemTab || activeTab].docType,
         uploadedBy: user?.profile?.full_name || 'Guru Madrasah',
         uploadedAt: new Date().toISOString(),
-        googleDriveUrl: fallbackDriveUrl,
+        googleDriveUrl: hasDrive ? fallbackDriveUrl : undefined,
+        driveFileId: extractDriveFileIdFromUrl(fallbackDriveUrl),
       };
-    }
-    if (!stored) {
-      notify('Berkas lokal tidak ditemukan di perangkat ini. Silakan buka tautan Google Drive.');
-      return;
     }
     setPreviewModalState({
       file: stored,
       title: fallbackTitle ? `Pratinjau: ${fallbackTitle}` : undefined,
+      driveUploadError: stored.driveUploadError,
       itemTab,
       itemId,
     });

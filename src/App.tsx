@@ -9,7 +9,6 @@ import { AppLayout } from './components/layout/AppLayout';
 import { DashboardPage } from './features/dashboard/DashboardPage';
 import { AccessDeniedPage } from './features/auth/AccessDeniedPage';
 import { ModulePlaceholder } from './components/common/ModulePlaceholder';
-import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { fileStorageService } from './services/fileStorageService';
 
 // Lazy-loaded feature pages untuk startup ringan & perpindahan menu cepat
@@ -441,18 +440,16 @@ const MainAppContent: React.FC = () => {
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <SyncProvider>
-        <AppSettingsProvider>
-          <AuthProvider>
-            <WorkspaceProvider>
-              <GoogleDriveProvider>
-                <MainAppContent />
-              </GoogleDriveProvider>
-            </WorkspaceProvider>
-          </AuthProvider>
-        </AppSettingsProvider>
-      </SyncProvider>
-    </ErrorBoundary>
+    <SyncProvider>
+      <AppSettingsProvider>
+        <AuthProvider>
+          <WorkspaceProvider>
+            <GoogleDriveProvider>
+              <MainAppContent />
+            </GoogleDriveProvider>
+          </WorkspaceProvider>
+        </AuthProvider>
+      </AppSettingsProvider>
+    </SyncProvider>
   );
 }
