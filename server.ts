@@ -14,7 +14,12 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
-const PORT = 3000;
+const isProductionEnv = process.env.NODE_ENV === 'production';
+const PORT = Number(
+  isProductionEnv && !process.env.NGINX_PORT
+    ? process.env.PORT || process.env.DEFAULT_APP_PORT || 3000
+    : process.env.DEFAULT_APP_PORT || 3000
+);
 const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
 const DEPRECATED_OR_INVALID_MODELS = new Set([
   'gemini-1.5-flash',
