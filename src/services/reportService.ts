@@ -135,19 +135,43 @@ async function loadMergedAssessmentSources(): Promise<{
     }
 
     if (grdRes.status === 'fulfilled' && !grdRes.value.error && Array.isArray(grdRes.value.data)) {
+      let unsyncedKeys = new Set<string>();
+      try {
+        const rawUnsynced = localStorage.getItem('local_unsynced_grades_v1');
+        const parsed = rawUnsynced ? JSON.parse(rawUnsynced) : [];
+        if (Array.isArray(parsed)) unsyncedKeys = new Set(parsed.map(String));
+      } catch {
+        // ignore
+      }
+
       const byKey = new Map<string, Grade>();
       for (const lg of localGrades) {
-        byKey.set(`${lg.assessment_id}__${lg.student_id}`, lg);
+        const k = `${lg.assessment_id}__${lg.student_id}`;
+        const prev = byKey.get(k);
+        if (!prev) {
+          byKey.set(k, lg);
+        } else {
+          const pMs = Date.parse(prev.updated_at || prev.created_at || '') || 0;
+          const cMs = Date.parse(lg.updated_at || lg.created_at || '') || 0;
+          if (cMs >= pMs) byKey.set(k, lg);
+        }
       }
+      const nowMs = Date.now();
       for (const rg of grdRes.value.data as Grade[]) {
+        if (unsyncedKeys.has(`${rg.assessment_id}_${rg.student_id}`)) {
+          continue;
+        }
         const key = `${rg.assessment_id}__${rg.student_id}`;
         const existing = byKey.get(key);
         if (!existing) {
           byKey.set(key, rg);
         } else {
-          const rMs = Date.parse(rg.updated_at || rg.created_at || '') || 0;
+          let rMs = Date.parse(rg.updated_at || rg.created_at || '') || 0;
+          if (rMs > nowMs + 5 * 60_000) {
+            rMs -= 7 * 3600_000;
+          }
           const lMs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
-          if (rMs >= lMs) {
+          if (rMs > lMs) {
             byKey.set(key, rg);
           }
         }

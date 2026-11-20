@@ -105,8 +105,15 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
 
   // Input Map: studentId -> { score: number, feedback: string }
   const [scoreInputs, setScoreInputs] = useState<Record<string, { score: number; feedback: string }>>({});
+  const [rawScores, setRawScores] = useState<Record<string, string>>({});
 
   const dirtyStudentIdsRef = useRef<Set<string>>(new Set());
+  const isSavingRef = useRef<boolean>(false);
+  const loadSeqRef = useRef<number>(0);
+  const scoreInputsRef = useRef(scoreInputs);
+  scoreInputsRef.current = scoreInputs;
+  const rawScoresRef = useRef(rawScores);
+  rawScoresRef.current = rawScores;
   const selectedAssessmentIdRef = useRef<string>(selectedAssessmentId);
   selectedAssessmentIdRef.current = selectedAssessmentId;
   const showFormModalRef = useRef<boolean>(showFormModal);
@@ -185,6 +192,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   );
 
   const loadData = useCallback(async (silent = false) => {
+    if (silent && isSavingRef.current) {
+      return;
+    }
+    const reqId = ++loadSeqRef.current;
     if (!silent) {
       setIsLoading(true);
     }
@@ -198,6 +209,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         academicService.getSettings(),
         academicService.getTeachers(),
       ]);
+
+      if (reqId !== loadSeqRef.current || (silent && isSavingRef.current)) {
+        return;
+      }
 
       setResolvedTeacher(teacher);
       setSettings(sys);
@@ -251,12 +266,17 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
             ? candidatePool.find((a) => a.scope_key === scopeContext.scopeKey)
             : undefined) ||
           candidatePool[0];
-        if (targetAsm.id !== currentSelectedId) {
+        const isSwitchingAssessment = targetAsm.id !== currentSelectedId;
+        if (isSwitchingAssessment) {
           dirtyStudentIdsRef.current.clear();
+          setRawScores({});
           setSelectedAssessmentId(targetAsm.id);
         }
 
         const grds = await assessmentService.getGrades(targetAsm.id);
+        if (reqId !== loadSeqRef.current || isSavingRef.current) {
+          return;
+        }
         setGrades(grds);
         const freshMap = buildScoreInputsForAssessment(
           targetAsm,
@@ -267,7 +287,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
           Number(sys?.kktp_default || 75)
         );
         setScoreInputs((prev) => {
-          if (!silent || dirtyStudentIdsRef.current.size === 0 || targetAsm.id !== currentSelectedId) {
+          if (isSwitchingAssessment || dirtyStudentIdsRef.current.size === 0) {
             return freshMap;
           }
           const merged = { ...freshMap };
@@ -280,6 +300,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         });
       } else {
         dirtyStudentIdsRef.current.clear();
+        setRawScores({});
         setSelectedAssessmentId('');
         setGrades([]);
         setScoreInputs({});
@@ -323,7 +344,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     ],
     () => {
       setScopeVersion((v) => v + 1);
-      void loadData(true);
+      if (!isSavingRef.current) {
+        void loadData(true);
+      }
     }
   );
 
@@ -438,6 +461,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   }, [contextAssessments, activeScopeTab, typeFilter, getAssessmentEffectiveScopeKey]);
 
   const handleSelectAssessment = useCallback(async (asmId: string) => {
+    const reqId = ++loadSeqRef.current;
+    dirtyStudentIdsRef.current.clear();
+    setRawScores({});
     setSelectedAssessmentId(asmId);
     const asm = assessments.find((a) => a.id === asmId);
     const linked = asm?.assignment || assignments.find((a) => a.id === asm?.assignment_id);
@@ -450,19 +476,31 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       });
     }
     try {
-      dirtyStudentIdsRef.current.clear();
       const grds = await assessmentService.getGrades(asmId);
+      if (reqId !== loadSeqRef.current || selectedAssessmentIdRef.current !== asmId) {
+        return;
+      }
       setGrades(grds);
-      setScoreInputs(
-        buildScoreInputsForAssessment(
-          asm,
-          grds,
-          assignments,
-          students,
-          classMembers,
-          Number(settings?.kktp_default || 75)
-        )
+      const freshMap = buildScoreInputsForAssessment(
+        asm,
+        grds,
+        assignments,
+        students,
+        classMembers,
+        Number(settings?.kktp_default || 75)
       );
+      setScoreInputs((prev) => {
+        if (dirtyStudentIdsRef.current.size === 0) {
+          return freshMap;
+        }
+        const merged = { ...freshMap };
+        dirtyStudentIdsRef.current.forEach((studentId) => {
+          if (prev[studentId]) {
+            merged[studentId] = prev[studentId];
+          }
+        });
+        return merged;
+      });
     } catch (err) {
       console.error('Gagal memilih asesmen:', err);
     }
@@ -685,16 +723,40 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     }
   };
 
-  const handleScoreChange = (studentId: string, val: number) => {
+  const handleRawScoreChange = (studentId: string, raw: string) => {
     dirtyStudentIdsRef.current.add(studentId);
-    const safeVal = Number.isNaN(val) ? 0 : Math.min(100, Math.max(0, val));
+    setRawScores((prev) => ({
+      ...prev,
+      [studentId]: raw,
+    }));
+    if (raw.trim() === '') {
+      setScoreInputs((prev) => ({
+        ...prev,
+        [studentId]: {
+          feedback: prev[studentId]?.feedback || '',
+          score: 0,
+        },
+      }));
+      return;
+    }
+    const parsed = Number(raw);
+    const safeVal = Number.isNaN(parsed) ? 0 : Math.min(100, Math.max(0, parsed));
     setScoreInputs((prev) => ({
       ...prev,
       [studentId]: {
-        ...prev[studentId],
+        feedback: prev[studentId]?.feedback || '',
         score: safeVal,
       },
     }));
+  };
+
+  const handleScoreBlur = (studentId: string) => {
+    setRawScores((prev) => {
+      if (!(studentId in prev)) return prev;
+      const next = { ...prev };
+      delete next[studentId];
+      return next;
+    });
   };
 
   const handleFeedbackChange = (studentId: string, text: string) => {
@@ -702,7 +764,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     setScoreInputs((prev) => ({
       ...prev,
       [studentId]: {
-        ...prev[studentId],
+        score: prev[studentId]?.score ?? currentKktp,
         feedback: text,
       },
     }));
@@ -720,6 +782,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
     if (Number.isNaN(numericVal)) return;
 
     displayedStudents.forEach((s) => dirtyStudentIdsRef.current.add(s.id));
+    setRawScores({});
     setScoreInputs((prev) => {
       const next = { ...prev };
       displayedStudents.forEach((s) => {
@@ -734,24 +797,78 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
   };
 
   const handleSaveGrades = async () => {
-    if (!currentAsm) return;
+    if (!currentAsm || isSavingRef.current) return;
+    const targetAsm = currentAsm;
+    const targetStudents = displayedStudents;
+    const kktpVal = Number(targetAsm.kktp || settings?.kktp_default || 75);
+
+    isSavingRef.current = true;
+    loadSeqRef.current++;
     setIsSaving(true);
+
     try {
-      const entries = displayedStudents.map((s) => ({
-        studentId: s.id,
-        score: scoreInputs[s.id]?.score ?? currentKktp,
-        feedback: scoreInputs[s.id]?.feedback || null,
-      }));
+      const latestRaw = rawScoresRef.current;
+      const latestInputs = scoreInputsRef.current;
+      const entries = targetStudents.map((s) => {
+        const raw = latestRaw[s.id];
+        let resolvedScore: number;
+        if (raw !== undefined && raw.trim() !== '') {
+          const parsed = Number(raw);
+          resolvedScore = Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : kktpVal;
+        } else {
+          const existingScore = latestInputs[s.id]?.score;
+          resolvedScore =
+            typeof existingScore === 'number' && Number.isFinite(existingScore)
+              ? Math.min(100, Math.max(0, existingScore))
+              : kktpVal;
+        }
+        return {
+          studentId: s.id,
+          score: resolvedScore,
+          feedback: latestInputs[s.id]?.feedback || null,
+        };
+      });
 
-      await assessmentService.saveGrades(currentAsm.id, entries);
-      dirtyStudentIdsRef.current.clear();
-      notifyDomFormSaved();
-      const grds = await assessmentService.getGrades(currentAsm.id);
-      setGrades(grds);
+      const savedGrades = await assessmentService.saveGrades(targetAsm.id, entries);
+      const grds = await assessmentService.getGrades(targetAsm.id);
+      const effectiveGrades = grds.length > 0 ? grds : savedGrades;
 
-      const linked = currentAsm.assignment || assignments.find((a) => a.id === currentAsm.assignment_id);
+      setGrades(effectiveGrades);
+      setRawScores({});
+
+      const savedEntryByStudent = new Map(entries.map((e) => [e.studentId, e]));
+      const persistedByStudent = new Map(effectiveGrades.map((g) => [g.student_id, g]));
+      setScoreInputs((prev) => {
+        const next = { ...prev };
+        targetStudents.forEach((s) => {
+          const sent = savedEntryByStudent.get(s.id);
+          const persisted = persistedByStudent.get(s.id);
+          const cur = prev[s.id];
+          const modifiedDuringSave =
+            sent &&
+            cur &&
+            (cur.score !== sent.score || (cur.feedback || '') !== (sent.feedback || ''));
+          if (!modifiedDuringSave) {
+            if (persisted) {
+              next[s.id] = {
+                score: Number(persisted.score),
+                feedback: persisted.feedback || '',
+              };
+            } else if (sent) {
+              next[s.id] = {
+                score: sent.score,
+                feedback: sent.feedback || '',
+              };
+            }
+            dirtyStudentIdsRef.current.delete(s.id);
+          }
+        });
+        return next;
+      });
+
+      const linked = targetAsm.assignment || assignments.find((a) => a.id === targetAsm.assignment_id);
       const targetSlot = reportService.resolveLedgerSlotForAssessment(
-        currentAsm,
+        targetAsm,
         linked?.subject_id,
         linked?.class?.level || 4
       );
@@ -759,10 +876,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
         ? ` dan diteruskan ke kolom ${LEDGER_SLOT_LABELS[targetSlot]} Leger Nilai.`
         : '.';
 
-      const belowKktpCount = entries.filter((e) => e.score < currentKktp).length;
+      const belowKktpCount = entries.filter((e) => e.score < kktpVal).length;
       if (belowKktpCount > 0) {
         showToast(
-          `Daftar nilai disimpan${ledgerMsg} ${belowKktpCount} siswa (< KKTP ${currentKktp}) otomatis masuk ke Remedial.`,
+          `Daftar nilai disimpan${ledgerMsg} ${belowKktpCount} siswa (< KKTP ${kktpVal}) otomatis masuk ke Remedial.`,
           'success'
         );
       } else {
@@ -772,7 +889,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
       console.error('Gagal menyimpan nilai:', err);
       showToast('Gagal menyimpan daftar nilai siswa.', 'error');
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
+      notifyDomFormSaved();
     }
   };
 
@@ -1454,8 +1573,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate, onScopeChang
                           type="number"
                           min="0"
                           max="100"
-                          value={input.score}
-                          onChange={(e) => handleScoreChange(student.id, Number(e.target.value))}
+                          value={rawScores[student.id] !== undefined ? rawScores[student.id] : String(input.score)}
+                          onChange={(e) => handleRawScoreChange(student.id, e.target.value)}
+                          onBlur={() => handleScoreBlur(student.id)}
+                          onWheel={(e) => e.currentTarget.blur()}
                           className="w-20 text-center font-mono tabular-nums font-bold text-sm py-1.5 px-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
                         />
                       </td>
